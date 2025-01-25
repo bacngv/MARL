@@ -1,7 +1,6 @@
-import importlib
 import gymnasium as gym
 from gymnasium.spaces import Tuple
-import magent2
+import magent2.environments
 
 class MAgent2Wrapper(gym.Env):
     metadata = {
@@ -10,53 +9,51 @@ class MAgent2Wrapper(gym.Env):
     }
 
     def __init__(self, env_name, **kwargs):
-        # Import the specific MAgent2 environment dynamically
-        self._env = magent2.make_env(env_name, **kwargs)
+        # Dynamic import might require a different approach
+        if env_name == "battle":
+            self._env = magent2.environments.battle.parallel_env(**kwargs)
+        elif env_name == "pursuit":
+            self._env = magent2.environments.pursuit.parallel_env(**kwargs)
+        elif env_name == "gather":
+            self._env = magent2.environments.gather.parallel_env(**kwargs)
+        else:
+            raise ValueError(f"Unsupported environment: {env_name}")
         
         obs, info = self._env.reset()
         self.n_agents = len(obs)
         self.last_obs = None
 
-        # Create action and observation spaces as Tuple
         self.action_space = Tuple(
-            tuple([self._env.action_space for _ in range(self.n_agents)])
+            tuple([self._env.action_space(agent) for agent in self._env.agents])
         )
         self.observation_space = Tuple(
-            tuple([self._env.observation_space for _ in range(self.n_agents)])
+            tuple([self._env.observation_space(agent) for agent in self._env.agents])
         )
 
     def reset(self, *args, **kwargs):
         obs, info = self._env.reset(*args, **kwargs)
-        obs = tuple(obs)
+        obs = tuple(obs.values())
         self.last_obs = obs
         return obs, info
 
-    def render(self, mode="human"):
-        return self._env.render(mode)
-
     def step(self, actions):
-        # Convert tuple actions to a format suitable for MAgent2
-        observations, rewards, dones, truncated, infos = self._env.step(actions)
+        observations, rewards, dones, truncated, infos = self._env.step({agent: action for agent, action in zip(self._env.agents, actions)})
 
-        # Convert observations and rewards to tuples
-        obs = tuple(observations)
-        rewards = list(rewards)
+        obs = tuple(observations.values())
+        rewards = list(rewards.values())
 
-        # Check for episode termination
-        done = all(dones)
-        truncated = all(truncated)
+        done = all(dones.values())
+        truncated = all(truncated.values())
 
-        # If episode is done, use last observation
         if done:
             obs = self.last_obs
             rewards = [0] * len(obs)
         else:
             self.last_obs = obs
 
-        # Flatten info dictionary if needed
         info = {
             f"agent_{i}_{key}": value
-            for i, agent_info in enumerate(infos)
+            for i, agent_info in enumerate(infos.values())
             for key, value in agent_info.items()
         }
 
@@ -65,24 +62,14 @@ class MAgent2Wrapper(gym.Env):
     def close(self):
         return self._env.close()
 
-# Utility function to register MAgent2 environments with Gymnasium
 def register_magent2_envs():
-    # List of available MAgent2 environments
-    magent2_envs = [
-        "pursuit",
-        "gather",
-        "battle",
-        # Add more environment names as needed
-    ]
+    magent2_envs = ["pursuit", "gather", "battle"]
 
     for env_name in magent2_envs:
         gym.register(
             id=f"magent2-{env_name}-v4",
-            entry_point="magent2_wrapper:MAgent2Wrapper",
-            kwargs={
-                "env_name": env_name,
-            },
+            entry_point="envs.magent2_wrapper:MAgent2Wrapper",
+            kwargs={"env_name": env_name},
         )
 
-# Call this function to register environments when the module is imported
 register_magent2_envs()
