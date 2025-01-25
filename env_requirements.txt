@@ -1,5 +1,6 @@
 lbforaging
 rware
+git+https://github.com/Farama-Foundation/MAgent2.git
 pettingzoo
 vmas[gymnasium]
 git+https://github.com/uoe-agents/matrix-games.git
