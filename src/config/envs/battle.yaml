@@ -1,5 +1,7 @@
+env: magent
+
 env_args:
   env_name: "magent_battle_v4"
-  map_name: "10_vs_10"
+  map_name: "10_vs_10" 
   seed: 42
   max_steps: 500
