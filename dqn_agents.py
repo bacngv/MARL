@@ -1,5 +1,5 @@
 from magent.builtin.tf_model import DeepQNetwork
-import magent
+import magent2
 class dqnAgents:
     def __init__(self, args, handel, models_names, env, logger):
         self.model_name = "dqn"

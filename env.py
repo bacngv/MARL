@@ -2,7 +2,7 @@ import argparse
 
 import math
 import numpy as np
-import magent
+import magent2
 
 # import torch
 

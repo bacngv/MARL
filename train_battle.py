@@ -1,231 +1,99 @@
-"""
-Train battle, two models in two processes
-"""
-
-import argparse
-import time
-import logging as log
-import math
-
+import torch
 import numpy as np
+from magent2.environments import battle_v4
+from qmix import QMIX
+from replay_buffer import ReplayBuffer
+import yaml
 
-import magent
-
-leftID, rightID = 0, 1
-def generate_map(env, map_size, handles):
-    """ generate a map, which consists of two squares of agents"""
-    width = height = map_size
-    init_num = map_size * map_size * 0.04
-    gap = 3
-
-    global leftID, rightID
-    leftID, rightID = rightID, leftID
-
-    # left
-    n = init_num
-    side = int(math.sqrt(n)) * 2
-    pos = []
-    for x in range(width//2 - gap - side, width//2 - gap - side + side, 2):
-        for y in range((height - side)//2, (height - side)//2 + side, 2):
-            pos.append([x, y, 0])
-    env.add_agents(handles[leftID], method="custom", pos=pos)
-
-    # right
-    n = init_num
-    side = int(math.sqrt(n)) * 2
-    pos = []
-    for x in range(width//2 + gap, width//2 + gap + side, 2):
-        for y in range((height - side)//2, (height - side)//2 + side, 2):
-            pos.append([x, y, 0])
-    env.add_agents(handles[rightID], method="custom", pos=pos)
+def load_args_from_yaml(yaml_path):
+    with open(yaml_path, 'r') as file:
+        data = yaml.safe_load(file)
+        return data['args']  # Access the 'args' dictionary directly
 
 
-def play_a_round(env, map_size, handles, models, print_every, train=True, render=False, eps=None):
-    """play a ground and train"""
+def preprocess_env(env):
     env.reset()
-    generate_map(env, map_size, handles)
+    env_agents = env.possible_agents
+    obs_spaces = env.observation_space(env_agents[0]).shape[0]
+    state_spaces = obs_spaces * len(env_agents)
+    num_actions = env.action_space(env_agents[0]).n
+    return obs_spaces, state_spaces, num_actions, env_agents
 
-    step_ct = 0
-    done = False
+def run_episode(env, agents, qmix, buffer, args):
+    env.reset()
+    terminated = False
+    episode_steps = 0
+    obs_dict = {agent: env.observe(agent) for agent in agents}
+    obs = np.array([obs_dict[agent] for agent in agents])
 
-    n = len(handles)
-    obs  = [[] for _ in range(n)]
-    ids  = [[] for _ in range(n)]
-    acts = [[] for _ in range(n)]
-    nums = [env.get_num(handle) for handle in handles]
-    total_reward = [0 for _ in range(n)]
+    episode_batch = {
+        'o': [],
+        'u': [],
+        'r': [],
+        'o_next': [],
+        'terminated': [],
+    }
+    
+    while not terminated:
+        actions = []
+        for agent_id in range(len(agents)):
+            obs_agent = torch.tensor(obs[agent_id], dtype=torch.float32).unsqueeze(0)
+            if args['cuda']:
+                obs_agent = obs_agent.cuda()
+            q_values, _ = qmix.eval_rnn(obs_agent, qmix.eval_hidden[agent_id].unsqueeze(0))
+            action = torch.argmax(q_values).item()
+            actions.append(action)
 
-    print("===== sample =====")
-    print("eps %.2f number %s" % (eps, nums))
-    start_time = time.time()
-    while not done:
-        # take actions for every model
-        for i in range(n):
-            obs[i] = env.get_observation(handles[i])
-            ids[i] = env.get_agent_id(handles[i])
-            # let models infer action in parallel (non-blocking)
-            models[i].infer_action(obs[i], ids[i], 'e_greedy', eps, block=False)
+        action_dict = {agents[i]: actions[i] for i in range(len(agents))}
+        next_obs_dict, rewards, dones, _ = env.step(action_dict)
+        next_obs = np.array([next_obs_dict[agent] for agent in agents])
+        reward = np.array([rewards[agent] for agent in agents])
+        terminated = any(dones.values())
 
-        for i in range(n):
-            acts[i] = models[i].fetch_action()  # fetch actions (blocking)
-            env.set_action(handles[i], acts[i])
+        episode_batch['o'].append(obs)
+        episode_batch['u'].append(actions)
+        episode_batch['r'].append(reward)
+        episode_batch['o_next'].append(next_obs)
+        episode_batch['terminated'].append([terminated] * len(agents))
 
-        # simulate one step
-        done = env.step()
-
-        # sample
-        step_reward = []
-        for i in range(n):
-            rewards = env.get_reward(handles[i])
-            if train:
-                alives = env.get_alive(handles[i])
-                # store samples in replay buffer (non-blocking)
-                models[i].sample_step(rewards, alives, block=False)
-            s = sum(rewards)
-            step_reward.append(s)
-            total_reward[i] += s
-
-        # render
-        if render:
-            env.render()
-
-        # stat info
-        nums = [env.get_num(handle) for handle in handles]
-
-        # clear dead agents
-        env.clear_dead()
-
-        # check return message of previous called non-blocking function sample_step()
-        if args.train:
-            for model in models:
-                model.check_done()
-
-        if step_ct % print_every == 0:
-            print("step %3d,  nums: %s reward: %s,  total_reward: %s " %
-                  (step_ct, nums, np.around(step_reward, 2), np.around(total_reward, 2)))
-
-        step_ct += 1
-        if step_ct > 550:
+        obs = next_obs
+        episode_steps += 1
+        if episode_steps >= args['max_episode_steps']:
             break
+    
+    buffer.store_episode(episode_batch)
 
-    sample_time = time.time() - start_time
-    print("steps: %d,  total time: %.2f,  step average %.2f" % (step_ct, sample_time, sample_time / step_ct))
+def train_qmix(qmix, buffer, args):
+    if buffer.current_size < args['batch_size']:
+        return
+    batch = buffer.sample(args['batch_size'])
+    qmix.learn(batch, args['max_episode_steps'], args['train_step'])
+    args['train_step'] += 1
 
-    # train
-    total_loss, value = [0 for _ in range(n)], [0 for _ in range(n)]
-    if train:
-        print("===== train =====")
-        start_time = time.time()
+def main():
+    # Load configuration from YAML
+    args = load_args_from_yaml("/content/MARL/application.yaml")
 
-        # train models in parallel
-        for i in range(n):
-            models[i].train(print_every=1000, block=False)
-        for i in range(n):
-            total_loss[i], value[i] = models[i].fetch_train()
+    # Make sure to update certain values that might not be in the YAML file
+    env = battle_v4.env(map_size=45, render_mode=None)
+    obs_spaces, state_spaces, num_actions, agents = preprocess_env(env)
 
-        train_time = time.time() - start_time
-        print("train_time %.2f" % train_time)
+    args.update({
+        'obs_space': obs_spaces,
+        'state_space': state_spaces,
+        'num_actions': num_actions
+    })
 
-    def round_list(l): return [round(x, 2) for x in l]
-    return round_list(total_loss), nums, round_list(total_reward), round_list(value)
+    buffer = ReplayBuffer(args)
+    qmix = QMIX(args, ["qmix_net", "rnn_net"], logger=None)
 
+    num_episodes = 5000
+    for episode in range(num_episodes):
+        run_episode(env, agents, qmix, buffer, args)
+        train_qmix(qmix, buffer, args)
+
+        if episode % 100 == 0:
+            print(f"Episode {episode}/{num_episodes} completed")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--save_every", type=int, default=5)
-    parser.add_argument("--render_every", type=int, default=10)
-    parser.add_argument("--n_round", type=int, default=2000)
-    parser.add_argument("--render",type=bool,default=True)
-    parser.add_argument("--load_from", type=int)
-    parser.add_argument("--train", type=bool,default=True)
-    parser.add_argument("--map_size", type=int, default=125)
-    parser.add_argument("--greedy", action="store_true")
-    parser.add_argument("--name", type=str, default="battle")
-    parser.add_argument("--eval", action="store_true")
-    parser.add_argument('--alg', default='dqn', choices=['dqn', 'drqn', 'a2c'])
-    args = parser.parse_args()
-
-    # set logger
-    magent.utility.init_logger(args.name)
-
-    # init the game
-    env = magent.GridWorld("battle", map_size=args.map_size)
-    env.set_render_dir('/home/lyf/qxx/MAgent-master/build/render')
-
-    # two groups of agents
-    handles = env.get_handles()
-
-    # sample eval observation set
-    eval_obs = [None, None]
-    if args.eval:
-        print("sample eval set...")
-        env.reset()
-        generate_map(env, args.map_size, handles)
-        for i in range(len(handles)):
-            eval_obs[i] = magent.utility.sample_observation(env, handles, 2048, 500)
-
-    # load models
-    batch_size = 256
-    unroll_step = 8
-    target_update = 1200
-    train_freq = 5
-
-    if args.alg == 'dqn':
-        from magent.builtin.tf_model import DeepQNetwork
-        RLModel = DeepQNetwork
-        base_args = {'batch_size': batch_size,
-                     'memory_size': 2 ** 20, 'learning_rate': 1e-4,
-                     'target_update': target_update, 'train_freq': train_freq}
-    elif args.alg == 'drqn':
-        from magent.builtin.tf_model import DeepRecurrentQNetwork
-        RLModel = DeepRecurrentQNetwork
-        base_args = {'batch_size': batch_size / unroll_step, 'unroll_step': unroll_step,
-                     'memory_size': 8 * 625, 'learning_rate': 1e-4,
-                     'target_update': target_update, 'train_freq': train_freq}
-    elif args.alg == 'a2c':
-        # see train_against.py to know how to use a2c
-        raise NotImplementedError
-
-    # init models
-    names = [args.name + "-l", args.name + "-r"]
-    models = []
-
-    for i in range(len(names)):
-        model_args = {'eval_obs': eval_obs[i]}
-        model_args.update(base_args)
-        models.append(magent.ProcessingModel(env, handles[i], names[i], 20000+i, 1000, RLModel, **model_args))
-
-    # load if
-    savedir = 'save_model'
-    if args.load_from is not None:
-        start_from = args.load_from
-        print("load ... %d" % start_from)
-        for model in models:
-            model.load(savedir, start_from)
-    else:
-        start_from = 0
-
-    # print state info
-
-    # play
-    start = time.time()
-    for k in range(start_from, start_from + args.n_round):
-        tic = time.time()
-        eps = magent.utility.piecewise_decay(k, [0, 700, 1400], [1, 0.2, 0.05]) if not args.greedy else 0
-        loss, num, reward, value = play_a_round(env, args.map_size, handles, models,
-                                                train=args.train, print_every=50,
-                                                render=args.render or (k+1) % args.render_every == 0,
-                                                eps=eps)  # for e-greedy
-
-        log.info("round %d\t loss: %s\t num: %s\t reward: %s\t value: %s" % (k, loss, num, reward, value))
-        print("round time %.2f  total time %.2f\n" % (time.time() - tic, time.time() - start))
-
-        # save models
-        if (k + 1) % args.save_every == 0 and args.train:
-            print("save model... ")
-            for model in models:
-                model.save(savedir, k)
-
-    # send quit command
-    for model in models:
-        model.quit()
+    main()
