@@ -3,9 +3,68 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-from qmix_net import RNN, QMixNet
 
 from . import tools
+
+class RNN(nn.Module):
+    def __init__(self, input_shape, args):
+        super(RNN, self).__init__()
+        self.args = args
+
+        self.fc1 = nn.Linear(input_shape, args['rnn_hidden_dim'])
+        self.rnn = nn.GRUCell(args['rnn_hidden_dim'], args['rnn_hidden_dim'])
+        self.fc2 = nn.Linear(args['rnn_hidden_dim'], args['num_actions'])
+
+    def forward(self, obs, hidden_state):
+        x = F.relu(self.fc1(obs))
+        h_in = hidden_state.reshape(-1, self.args['rnn_hidden_dim'])
+        h = self.rnn(x, h_in)
+        q = self.fc2(h)
+        return q, h
+
+class QMixNet(nn.Module):
+    def __init__(self, args):
+        super(QMixNet, self).__init__()
+        self.args = args
+
+        if args['two_hyper_layers']:
+            self.hyper_w1 = nn.Sequential(nn.Linear(args['state_shape'], args['hyper_hidden_dim']),
+                                          nn.ReLU(),
+                                          nn.Linear(args['hyper_hidden_dim'], args['n_agents'] * args['qmix_hidden_dim']))
+            self.hyper_w2 = nn.Sequential(nn.Linear(args['state_shape'], args['hyper_hidden_dim']),
+                                          nn.ReLU(),
+                                          nn.Linear(args['hyper_hidden_dim'], args['qmix_hidden_dim']))
+        else:
+            self.hyper_w1 = nn.Linear(args['state_space'], args['num_agents'] * args['qmix_hidden_dim'])
+            self.hyper_w2 = nn.Linear(args['state_space'], args['qmix_hidden_dim'] * 1)
+
+        self.hyper_b1 = nn.Linear(args['state_space'], args['qmix_hidden_dim'])
+        self.hyper_b2 = nn.Sequential(nn.Linear(args['state_space'], args['qmix_hidden_dim']),
+                                      nn.ReLU(),
+                                      nn.Linear(args['qmix_hidden_dim'], 1))
+
+    def forward(self, q_values, states):
+        episode_num = q_values.size(0)
+        q_values = q_values.view(-1, 1, self.args['num_agents'])
+        states = states.reshape(-1, self.args['state_space'])
+
+        w1 = torch.abs(self.hyper_w1(states))
+        b1 = self.hyper_b1(states)
+
+        w1 = w1.view(-1, self.args['num_agents'], self.args['qmix_hidden_dim'])
+        b1 = b1.view(-1, 1, self.args['qmix_hidden_dim'])
+
+        hidden = F.elu(torch.bmm(q_values, w1) + b1)
+
+        w2 = torch.abs(self.hyper_w2(states))
+        b2 = self.hyper_b2(states)
+
+        w2 = w2.view(-1, self.args['qmix_hidden_dim'], 1)
+        b2 = b2.view(-1, 1, 1)
+
+        q_total = torch.bmm(hidden, w2) + b2
+        q_total = q_total.view(episode_num, -1, 1)
+        return q_total
 
 class QMIX(nn.Module):
     def __init__(self, env, name, handle, gamma=0.99, batch_size=64, 
@@ -35,14 +94,41 @@ class QMIX(nn.Module):
         if last_action:
             input_shape += self.num_actions
         
-        self.eval_rnn = RNN(input_shape, {'rnn_hidden_dim': rnn_hidden_dim})
-        self.target_rnn = RNN(input_shape, {'rnn_hidden_dim': rnn_hidden_dim})
-        self.eval_qmix_net = QMixNet({'state_space': self.state_space})
-        self.target_qmix_net = QMixNet({'state_space': self.state_space})
+        self.eval_rnn = RNN(input_shape, {
+            'rnn_hidden_dim': rnn_hidden_dim, 
+            'num_actions': self.num_actions
+        })
+        self.target_rnn = RNN(input_shape, {
+            'rnn_hidden_dim': rnn_hidden_dim, 
+            'num_actions': self.num_actions
+        })
+        
+        self.eval_qmix_net = QMixNet({
+            'state_space': self.state_space, 
+            'num_agents': self.num_agents, 
+            'qmix_hidden_dim': 32,  # example value, adjust as needed
+            'two_hyper_layers': False
+        })
+        self.target_qmix_net = QMixNet({
+            'state_space': self.state_space, 
+            'num_agents': self.num_agents, 
+            'qmix_hidden_dim': 32,  # example value, adjust as needed
+            'two_hyper_layers': False
+        })
         
         # Optimizer
         self.eval_parameters = list(self.eval_qmix_net.parameters()) + list(self.eval_rnn.parameters())
         self.optim = torch.optim.RMSprop(self.eval_parameters, lr=learning_rate)
+        
+        # Replay Buffer
+        self.replay_buffer = tools.ReplayBufferQMIX({
+            'num_actions': self.num_actions,
+            'num_agents': self.num_agents,
+            'state_space': self.state_space,
+            'obs_space': self.obs_space,
+            'buffer_size': 5000,  # adjust as needed
+            'max_episode_steps': 100  # adjust as needed
+        })
         
         # Device configuration
         self.device = torch.device('cuda' if use_cuda and torch.cuda.is_available() else 'cpu')
@@ -56,7 +142,6 @@ class QMIX(nn.Module):
         self.target_rnn.load_state_dict(self.eval_rnn.state_dict())
         self.target_qmix_net.load_state_dict(self.eval_qmix_net.state_dict())
         
-        self.replay_buffer = tools.EpisodesBuffer()
         self.use_cuda = use_cuda
         
         # Hidden states
@@ -65,46 +150,33 @@ class QMIX(nn.Module):
     
     def train(self, train_step):
         # Sample from replay buffer
-        batch_data = self.replay_buffer.episodes()
-        self.replay_buffer = tools.EpisodesBuffer()
+        batch_data = self.replay_buffer.sample(self.batch_size)
         
         # Prepare training data
         if not batch_data:
             return
         
-        episode_num = batch_data[0].observations.shape[0]
-        max_episode_len = batch_data[0].observations.shape[1]
-        
-        # Prepare batch dictionary
-        batch = {
-            'o': np.array([episode.observations for episode in batch_data]),
-            'u': np.array([episode.actions for episode in batch_data]),
-            'r': np.array([episode.rewards for episode in batch_data]),
-            's': np.array([episode.states for episode in batch_data]),
-            'terminated': np.zeros((episode_num, max_episode_len)),
-            'padded': np.zeros((episode_num, max_episode_len)),
-            'avail_u': np.ones((episode_num, max_episode_len, self.num_agents, self.num_actions)),
-            'avail_u_next': np.ones((episode_num, max_episode_len, self.num_agents, self.num_actions))
-        }
+        episode_num = batch_data['o'].shape[0]
+        max_episode_len = batch_data['o'].shape[1]
         
         # Initialize hidden states
         self.init_hidden(episode_num)
         
         # Learn
-        q_evals, q_targets = self.get_q_values(batch, max_episode_len)
+        q_evals, q_targets = self.get_q_values(batch_data, max_episode_len)
         
-        # Compute loss similar to original QMIX implementation
-        u_onehot = torch.zeros(batch['u'].shape + (self.num_actions,))
-        u_onehot.scatter_(-1, batch['u'][..., np.newaxis], 1)
+        # Compute loss 
+        u_onehot = torch.zeros(batch_data['u'].shape + (self.num_actions,))
+        u_onehot.scatter_(-1, batch_data['u'][..., np.newaxis], 1)
         
         q_evals = torch.gather(q_evals, dim=3, index=u_onehot.long()).squeeze(3)
         
         q_targets = q_targets.max(dim=3)[0]
         
-        q_total_eval = self.eval_qmix_net(q_evals, torch.FloatTensor(batch['s']))
-        q_total_target = self.target_qmix_net(q_targets, torch.FloatTensor(batch['s']))
+        q_total_eval = self.eval_qmix_net(q_evals, torch.FloatTensor(batch_data['s']))
+        q_total_target = self.target_qmix_net(q_targets, torch.FloatTensor(batch_data['s']))
         
-        targets = torch.FloatTensor(batch['r']) + self.gamma * q_total_target * (1 - torch.FloatTensor(batch['terminated']))
+        targets = torch.FloatTensor(batch_data['r']) + self.gamma * q_total_target * (1 - torch.FloatTensor(batch_data['terminated']))
         
         loss = F.mse_loss(q_total_eval, targets.detach())
         
@@ -149,7 +221,7 @@ class QMIX(nn.Module):
         
         inputs, inputs_next = [], []
         inputs.append(obs)
-        inputs_next.append(batch['o'][:, transition_idx])
+        inputs_next.append(batch['o_next'][:, transition_idx])
         
         if self.last_action:
             if transition_idx == 0:
@@ -168,7 +240,19 @@ class QMIX(nn.Module):
         self.target_hidden = torch.zeros((episode_num, self.num_agents, self.rnn_hidden_dim))
     
     def flush_buffer(self, **kwargs):
-        self.replay_buffer.push(**kwargs)
+        # Prepare episode batch for ReplayBufferQMIX
+        episode_batch = {
+            'o': kwargs['state'][0],
+            'u': kwargs['acts'].reshape(-1, self.num_agents, 1),
+            's': kwargs.get('global_state', kwargs['state'][1]),
+            'r': kwargs['rewards'].reshape(-1, self.num_agents),
+            'o_next': kwargs.get('next_state', kwargs['state'][0]),
+            's_next': kwargs.get('next_global_state', kwargs['state'][1]),
+            'u_onehot': F.one_hot(torch.tensor(kwargs['acts']), num_classes=self.num_actions).numpy(),
+            'padded': np.zeros((len(kwargs['acts']), 1)),
+            'terminated': np.zeros((len(kwargs['acts']), 1))
+        }
+        self.replay_buffer.store_episode(episode_batch)
     
     def act(self, **kwargs):
         obs = kwargs['obs']

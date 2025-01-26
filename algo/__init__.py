@@ -1,6 +1,6 @@
 from . import q_learning
 from . import ac
-from qmix import qmix
+from . import qmix
 
 IQL = q_learning.DQN
 MFQ = q_learning.MFQ
