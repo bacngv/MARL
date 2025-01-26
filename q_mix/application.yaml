@@ -1,0 +1,47 @@
+args:
+  obs_space: 605
+  state_space: 9075
+  action_space: 21
+  num_actions: 21
+  num_agents: 50
+  max_episode_steps: 150 #100最佳
+  max_episode_steps_test: 150 #100够用
+  difficulty: '7'
+  game_version: 'latest'
+  map: '3m'
+  map_size: 30
+  seed: 123
+  step_mul: 8
+  replay_dir: ''
+  alg: 'qmix'
+  last_action: True
+  reuse_network: True
+  gamma: 0.99
+  optimizer: "RMS"
+  n_evaluate_episode: 3
+  save_model_dir: './model/save_model'
+  load_model_dir: './model/load_model'
+  result_dir: './result'
+  load_model: False
+  learn: True
+  cuda: True
+  threshold: 19.9
+  rival: "dqn"
+  rnn_hidden_dim: 32
+  two_hyper_layers: False
+  qmix_hidden_dim: 32
+  lr: 5e-4
+  epsilon: 0.05
+  min_epsilon: 0.05
+  anneal_steps: 50000
+  n_epoch: 351 #总训练epoch数
+  n_episodes: 1
+  train_steps: 2
+  evaluate_cycle: 100
+  batch_size: 32
+  buffer_size: 60
+  save_cycle: 9
+  target_update_cycle: 60
+  grad_norm_clip: 10
+  anneal_epsilon:
+  attention: False

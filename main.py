@@ -10,34 +10,6 @@ if __name__ == "__main__":
     fps = 35
     frames = []
 
-    # random policies
-    env.reset()
-    for agent in env.agent_iter():
-        observation, reward, termination, truncation, info = env.last()
-
-        if termination or truncation:
-            action = None  # this agent has died
-        else:
-            action = env.action_space(agent).sample()
-
-        env.step(action)
-
-        if agent == "red_0":
-            frames.append(env.render())
-
-    height, width, _ = frames[0].shape
-    out = cv2.VideoWriter(
-        os.path.join(vid_dir, f"random.mp4"),
-        cv2.VideoWriter_fourcc(*"mp4v"),
-        fps,
-        (width, height),
-    )
-    for frame in frames:
-        frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-        out.write(frame_bgr)
-    out.release()
-    print("Done recording random agents")
-
     # pretrained policies
     frames = []
     env.reset()
