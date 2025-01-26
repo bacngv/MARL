@@ -1,10 +1,10 @@
-from magent2.environments import battle_v3
+from magent2.environments import battle_v4
 import os
 import cv2
 
 
 if __name__ == "__main__":
-    env = battle_v3.env(map_size=45, render_mode="rgb_array")
+    env = battle_v4.env(map_size=45, render_mode="rgb_array")
     vid_dir = "video"
     os.makedirs(vid_dir, exist_ok=True)
     fps = 35

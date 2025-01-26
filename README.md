@@ -7,14 +7,23 @@ In this final project, you will develop and train a reinforcement learning (RL) 
 3. A Final Agent: A stronger pretrained agent, which will be released in the final week of the course before the deadline.
 
 Your agent's performance should be evaluated based on reward and win rate against each of these models. You should control *blue* agents when evaluating.
-<p align="center"> <img src="data/battle_vs_random.gif" width="300" alt="Battle vs Random Agent" /> </p> <p align="center"> <em>Random vs IQL</em> </p>
-<p align="center"> <img src="data/battle_vs_dqn.gif" width="300" alt="Battle vs Random Agent" /> <img src="data/battle_vs_final.gif" width="300" alt="Battle vs Final Agent" /> </p> <p align="center"> <em>Left: red.pt vs IQL, Right: red_final.pt vs IQL</em> </p>
+
+
+<p align="center">
+  <img src="assets/random.gif" width="300" alt="random agent" />
+  <img src="assets/pretrained.gif" width="300" alt="pretrained agent" />
+</p>
 
 See `video` folder for a demo of how each type of opponent behaves.
-Checkout the [Colab notebook](https://drive.google.com/file/d/1YBfdcZdRyzDQCIqgf8Ed3rUC_h9D0LqM) for running this demo.
+Checkout a [Colab notebook](https://colab.research.google.com/drive/1qmx_NCmzPlc-atWqexn2WueqMKB_ZTxc?usp=sharing) for running this demo.
 
-## How to run
-Checkout the [PIPELINE](https://colab.research.google.com/drive/1YBfdcZdRyzDQCIqgf8Ed3rUC_h9D0LqM) for a comprehensive overview of running the agent in the MAgent2 environment.
+Update: The final ~~stronger~~ agent is released, this agent is trained on selfplay in about 15 minutes using DQN. See the below video
+
+<p align="center">
+<img src="assets/blueselfplay.gif" width="300" alt="selfplay blue vs random" />
+  <img src="assets/redselfplay.gif" width="300" alt="selfplay combat" />
+</p>
+In the above demo, the left side shows the blue agent competing against random red agents, while the right side displays a battle between two self-play agents. Blue agents can comfortably defeat random agents, showing their cabability toward untrained agents, but they struggle with the red ones, which are intentionally trained more, so that they can dominate blue ones. As before, you should evaluate your agents against the red agents.
 
 ## Installation
 clone this repo and install with

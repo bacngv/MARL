@@ -1,6 +1,3 @@
-moviepy
-numpy
 git+https://github.com/Farama-Foundation/MAgent2
+opencv-python
 torch
-torchaudio
-torchvision
