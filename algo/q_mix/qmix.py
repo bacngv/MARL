@@ -3,160 +3,185 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+from qmix_net import RNN, QMixNet
 
 from . import tools
 
 class QMIX(nn.Module):
-    def __init__(self, env, handle, name='QMIX', 
-                 gamma=0.99, 
-                 batch_size=64, 
-                 learning_rate=1e-3, 
-                 rnn_hidden_dim=64,
-                 value_coef=0.1,
-                 use_cuda=False,
-                 last_action=False):
+    def __init__(self, env, name, handle, gamma=0.99, batch_size=64, 
+                 learning_rate=1e-3, use_cuda=False, 
+                 last_action=False, rnn_hidden_dim=64, 
+                 grad_norm_clip=10, target_update_cycle=200):
         super(QMIX, self).__init__()
         
         self.env = env
         self.name = name
         self.num_agents = env.unwrapped.env.get_agent_num(handle)
         self.num_actions = env.unwrapped.env.get_action_space(handle)[0]
-        self.obs_space = env.unwrapped.env.get_obs_space(handle)[0]
         self.state_space = env.unwrapped.env.get_state_space()
+        self.obs_space = env.unwrapped.env.get_obs_space(handle)[0]
         
         # Hyperparameters
         self.gamma = gamma
         self.batch_size = batch_size
         self.learning_rate = learning_rate
-        self.rnn_hidden_dim = rnn_hidden_dim
-        self.value_coef = value_coef
         self.last_action = last_action
+        self.rnn_hidden_dim = rnn_hidden_dim
+        self.grad_norm_clip = grad_norm_clip
+        self.target_update_cycle = target_update_cycle
         
-        # Training buffers
+        # Network initialization
+        input_shape = self.obs_space
+        if last_action:
+            input_shape += self.num_actions
+        
+        self.eval_rnn = RNN(input_shape, {'rnn_hidden_dim': rnn_hidden_dim})
+        self.target_rnn = RNN(input_shape, {'rnn_hidden_dim': rnn_hidden_dim})
+        self.eval_qmix_net = QMixNet({'state_space': self.state_space})
+        self.target_qmix_net = QMixNet({'state_space': self.state_space})
+        
+        # Optimizer
+        self.eval_parameters = list(self.eval_qmix_net.parameters()) + list(self.eval_rnn.parameters())
+        self.optim = torch.optim.RMSprop(self.eval_parameters, lr=learning_rate)
+        
+        # Device configuration
+        self.device = torch.device('cuda' if use_cuda and torch.cuda.is_available() else 'cpu')
+        if use_cuda:
+            self.eval_rnn.to(self.device)
+            self.target_rnn.to(self.device)
+            self.eval_qmix_net.to(self.device)
+            self.target_qmix_net.to(self.device)
+        
+        # Synchronize target networks
+        self.target_rnn.load_state_dict(self.eval_rnn.state_dict())
+        self.target_qmix_net.load_state_dict(self.eval_qmix_net.state_dict())
+        
         self.replay_buffer = tools.EpisodesBuffer()
-        
-        # Network construction
-        self.net = self._construct_net()
-        self.optim = torch.optim.Adam(self.get_all_params(), lr=self.learning_rate)
         self.use_cuda = use_cuda
         
-    def _construct_net(self):
-        net = nn.ModuleDict()
-        
-        # RNN for individual agent Q-values
-        input_shape = self.obs_space + (self.num_actions if self.last_action else 0)
-        net['rnn'] = nn.GRU(input_shape, self.rnn_hidden_dim, batch_first=True)
-        net['q_head'] = nn.Linear(self.rnn_hidden_dim, self.num_actions)
-        
-        # QMIX mixing network
-        net['hyper_w1'] = nn.Linear(self.state_space, self.rnn_hidden_dim * self.num_agents)
-        net['hyper_w2'] = nn.Linear(self.state_space, 1)
-        net['hyper_b1'] = nn.Linear(self.state_space, self.rnn_hidden_dim)
-        
-        return net
+        # Hidden states
+        self.eval_hidden = None
+        self.target_hidden = None
     
-    def get_all_params(self):
-        return list(self.net.parameters())
-    
-    def train(self, cuda):
+    def train(self, train_step):
+        # Sample from replay buffer
         batch_data = self.replay_buffer.episodes()
         self.replay_buffer = tools.EpisodesBuffer()
         
         # Prepare training data
-        states, obs, actions, rewards, next_states, next_obs = self._prepare_batch(batch_data)
+        if not batch_data:
+            return
         
-        # Compute Q-values and target Q-values
-        q_values = self._compute_q_values(obs, actions)
-        target_q_values = self._compute_target_q_values(next_obs)
+        episode_num = batch_data[0].observations.shape[0]
+        max_episode_len = batch_data[0].observations.shape[1]
         
-        # Compute TD targets
-        td_targets = rewards + self.gamma * target_q_values
+        # Prepare batch dictionary
+        batch = {
+            'o': np.array([episode.observations for episode in batch_data]),
+            'u': np.array([episode.actions for episode in batch_data]),
+            'r': np.array([episode.rewards for episode in batch_data]),
+            's': np.array([episode.states for episode in batch_data]),
+            'terminated': np.zeros((episode_num, max_episode_len)),
+            'padded': np.zeros((episode_num, max_episode_len)),
+            'avail_u': np.ones((episode_num, max_episode_len, self.num_agents, self.num_actions)),
+            'avail_u_next': np.ones((episode_num, max_episode_len, self.num_agents, self.num_actions))
+        }
         
-        # Compute loss
-        loss = F.mse_loss(q_values, td_targets)
+        # Initialize hidden states
+        self.init_hidden(episode_num)
+        
+        # Learn
+        q_evals, q_targets = self.get_q_values(batch, max_episode_len)
+        
+        # Compute loss similar to original QMIX implementation
+        u_onehot = torch.zeros(batch['u'].shape + (self.num_actions,))
+        u_onehot.scatter_(-1, batch['u'][..., np.newaxis], 1)
+        
+        q_evals = torch.gather(q_evals, dim=3, index=u_onehot.long()).squeeze(3)
+        
+        q_targets = q_targets.max(dim=3)[0]
+        
+        q_total_eval = self.eval_qmix_net(q_evals, torch.FloatTensor(batch['s']))
+        q_total_target = self.target_qmix_net(q_targets, torch.FloatTensor(batch['s']))
+        
+        targets = torch.FloatTensor(batch['r']) + self.gamma * q_total_target * (1 - torch.FloatTensor(batch['terminated']))
+        
+        loss = F.mse_loss(q_total_eval, targets.detach())
         
         # Optimize
         self.optim.zero_grad()
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.get_all_params(), 5.0)
+        torch.nn.utils.clip_grad_norm_(self.eval_parameters, self.grad_norm_clip)
         self.optim.step()
         
-        print(f'[*] QMIX Loss: {loss.item():.6f}')
+        # Update target networks periodically
+        if train_step > 0 and train_step % self.target_update_cycle == 0:
+            self.target_rnn.load_state_dict(self.eval_rnn.state_dict())
+            self.target_qmix_net.load_state_dict(self.eval_qmix_net.state_dict())
+        
+        return loss.item()
     
-    def _prepare_batch(self, batch_data):
-        # Prepare training data from episode batches
-        states, obs, actions, rewards, next_states, next_obs = [], [], [], [], [], []
-        for episode in batch_data:
-            states.append(episode.states)
-            obs.append(episode.obs)
-            actions.append(episode.actions)
-            rewards.append(episode.rewards)
-            next_states.append(episode.next_states)
-            next_obs.append(episode.next_obs)
+    def get_q_values(self, batch, max_episode_len):
+        episode_num = batch['o'].shape[0]
+        q_evals, q_targets = [], []
         
-        # Convert to tensors
-        states = torch.FloatTensor(states)
-        obs = torch.FloatTensor(obs)
-        actions = torch.LongTensor(actions)
-        rewards = torch.FloatTensor(rewards)
-        next_states = torch.FloatTensor(next_states)
-        next_obs = torch.FloatTensor(next_obs)
+        for transition_idx in range(max_episode_len):
+            inputs, inputs_next = self._get_inputs(batch, transition_idx)
+            
+            q_eval, self.eval_hidden = self.eval_rnn(inputs, self.eval_hidden)
+            q_target, self.target_hidden = self.target_rnn(inputs_next, self.target_hidden)
+            
+            q_eval = q_eval.view(episode_num, self.num_agents, -1)
+            q_target = q_target.view(episode_num, self.num_agents, -1)
+            
+            q_evals.append(q_eval)
+            q_targets.append(q_target)
         
-        return states, obs, actions, rewards, next_states, next_obs
+        q_evals = torch.stack(q_evals, dim=1)
+        q_targets = torch.stack(q_targets, dim=1)
+        
+        return q_evals, q_targets
     
-    def _compute_q_values(self, obs, actions):
-        # Compute individual agent Q-values
-        h_0 = torch.zeros(1, obs.size(0), self.rnn_hidden_dim)
-        _, h_n = self.net['rnn'](obs, h_0)
-        q_individual = self.net['q_head'](h_n.squeeze(0))
+    def _get_inputs(self, batch, transition_idx):
+        obs = batch['o'][:, transition_idx]
+        u_onehot = batch['u']
+        episode_num = obs.shape[0]
         
-        # QMIX mixing network
-        q_total = self._mix_q_values(q_individual, obs)
+        inputs, inputs_next = [], []
+        inputs.append(obs)
+        inputs_next.append(batch['o'][:, transition_idx])
         
-        return q_total
+        if self.last_action:
+            if transition_idx == 0:
+                inputs.append(torch.zeros_like(u_onehot[:, transition_idx]))
+            else:
+                inputs.append(u_onehot[:, transition_idx - 1])
+            inputs_next.append(u_onehot[:, transition_idx])
+        
+        inputs = torch.cat([x.reshape(episode_num * self.num_agents, -1) for x in inputs], dim=1)
+        inputs_next = torch.cat([x.reshape(episode_num * self.num_agents, -1) for x in inputs_next], dim=1)
+        
+        return inputs, inputs_next
     
-    def _compute_target_q_values(self, next_obs):
-        # Similar to _compute_q_values but with target computation
-        h_0 = torch.zeros(1, next_obs.size(0), self.rnn_hidden_dim)
-        _, h_n = self.net['rnn'](next_obs, h_0)
-        q_individual = self.net['q_head'](h_n.squeeze(0))
-        
-        # Compute maximum Q-value
-        q_max = q_individual.max(dim=-1)[0]
-        
-        return q_max
-    
-    def _mix_q_values(self, q_individual, state):
-        # Hypernetwork for mixing individual Q-values
-        w1 = torch.abs(self.net['hyper_w1'](state)).reshape(-1, self.num_agents, self.rnn_hidden_dim)
-        w2 = torch.abs(self.net['hyper_w2'](state))
-        b1 = self.net['hyper_b1'](state)
-        
-        # Mixing Q-values
-        hidden = F.elu(torch.matmul(w1, q_individual.unsqueeze(-1)).squeeze(-1) + b1)
-        q_total = torch.matmul(hidden, w2).squeeze(-1)
-        
-        return q_total
-    
-    def act(self, **kwargs):
-        obs = kwargs['obs']
-        h_0 = torch.zeros(1, obs.size(0), self.rnn_hidden_dim)
-        _, h_n = self.net['rnn'](obs, h_0)
-        q_values = self.net['q_head'](h_n.squeeze(0))
-        
-        action = q_values.argmax(dim=-1).numpy().astype(np.int32)
-        return action.reshape((-1,))
+    def init_hidden(self, episode_num):
+        self.eval_hidden = torch.zeros((episode_num, self.num_agents, self.rnn_hidden_dim))
+        self.target_hidden = torch.zeros((episode_num, self.num_agents, self.rnn_hidden_dim))
     
     def flush_buffer(self, **kwargs):
         self.replay_buffer.push(**kwargs)
     
+    def act(self, **kwargs):
+        obs = kwargs['obs']
+        self.eval_hidden = torch.zeros((1, self.num_agents, self.rnn_hidden_dim))
+        q_values, _ = self.eval_rnn(obs, self.eval_hidden)
+        action = q_values.argmax(dim=1).detach().cpu().numpy()
+        return action.astype(np.int32).reshape((-1,))
+    
     def save(self, dir_path, step=0):
         os.makedirs(dir_path, exist_ok=True)
-        file_path = os.path.join(dir_path, f"qmix_{step}")
-        torch.save(self.net.state_dict(), file_path)
-        print("[*] Model saved")
+        torch.save(self.eval_qmix_net.state_dict(), os.path.join(dir_path, f'{step}_qmix_net.pkl'))
+        torch.save(self.eval_rnn.state_dict(), os.path.join(dir_path, f'{step}_rnn_net.pkl'))
     
     def load(self, dir_path, step=0):
-        file_path = os.path.join(dir_path, f"qmix_{step}")
-        self.net.load_state_dict(torch.load(file_path))
-        print("[*] Loaded model")
+        self.eval_qmix_net.load_state_dict(torch.load(os.path.join(dir_path, f'{step}_qmix_net.pkl')))
+        self.eval_rnn.load_state_dict(torch.load(os.path.join(dir_path, f'{step}_rnn_net.pkl')))
