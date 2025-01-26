@@ -36,7 +36,7 @@ def random_agent(handle, max_steps, cuda=True):
         def act(self, obs, eps):
             # Randomly generate actions for all agents in the group
             n_agents = obs.shape[0]
-            act_space = 9  # Assuming 9 possible actions in battle environment
+            act_space = 21  # Assuming 9 possible actions in battle environment
             return torch.randint(0, act_space, (n_agents,))
         
         def save(self, path, iteration):
