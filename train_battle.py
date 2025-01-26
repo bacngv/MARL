@@ -1,6 +1,7 @@
 """Self Play with MAgent2 Battle V4 Environment"""
 import argparse
 import os
+import random
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -26,6 +27,28 @@ def linear_decay(epoch, x, y):
             break
     return eps
 
+def random_agent(handle, max_steps, cuda=True):
+    class RandomAgent:
+        def __init__(self, handle, max_steps):
+            self.handle = handle
+            self.max_steps = max_steps
+        
+        def act(self, obs, eps):
+            # Randomly generate actions for all agents in the group
+            n_agents = obs.shape[0]
+            act_space = 9  # Assuming 9 possible actions in battle environment
+            return torch.randint(0, act_space, (n_agents,))
+        
+        def save(self, path, iteration):
+            # No model to save for random agent
+            pass
+        
+        def get_all_params(self):
+            # No parameters for random agent
+            return []
+    
+    return RandomAgent(handle, max_steps)
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--algo', type=str, choices={'ac', 'mfac', 'mfq', 'iql'}, help='choose an algorithm from the preset', required=True)
@@ -36,10 +59,11 @@ if __name__ == '__main__':
     parser.add_argument('--map_size', type=int, default=50, help='set the size of map') 
     parser.add_argument('--max_steps', type=int, default=400, help='set the max steps')
     parser.add_argument('--cuda', type=bool, default=True, help='use the cuda')
+    parser.add_argument('--self_play', type=bool, default=True, help='use self-play or random opponent')
     args = parser.parse_args()
 
     # init env
-    env = battle_v4.env(map_size=args.map_size,max_cycles = args.max_steps ,render_mode="rgb_array")
+    env = battle_v4.env(map_size=args.map_size, max_cycles=args.max_steps, render_mode="rgb_array")
 
     handles = env.unwrapped.env.get_handles()
     log_dir = os.path.join(BASE_DIR, 'data/tmp/{}'.format(args.algo))
@@ -47,28 +71,49 @@ if __name__ == '__main__':
     model_dir = os.path.join(BASE_DIR, 'data/models/{}'.format(args.algo))
     
     start_from = 0
-    models = [
-        spawn_ai(args.algo, env, handles[0], args.algo + '-me', args.max_steps, args.cuda), 
-        spawn_ai(args.algo, env, handles[1], args.algo + '-opponent', args.max_steps, args.cuda)
-    ]
-
-    runner = tools.Runner(
-        env, 
-        handles, 
-        args.max_steps, 
-        models, 
-        play,
-        render_every=args.save_every if args.render else 0, 
-        save_every=args.save_every, 
-        tau=0.01, 
-        log_name=args.algo,
-        log_dir=log_dir, 
-        model_dir=model_dir, 
-        render_dir=render_dir, 
-        train=True, 
-        cuda=args.cuda
-    )
-
+    
+    # Choose opponent based on self_play flag
+    if args.self_play:
+        models = [
+            spawn_ai(args.algo, env, handles[0], args.algo + '-me', args.max_steps, args.cuda), 
+            spawn_ai(args.algo, env, handles[1], args.algo + '-opponent', args.max_steps, args.cuda)
+        ]
+        runner = tools.Runner(
+            env, 
+            handles, 
+            args.max_steps, 
+            models, 
+            play,
+            render_every=args.save_every if args.render else 0, 
+            save_every=args.save_every, 
+            tau=0.01, 
+            log_name=args.algo,
+            log_dir=log_dir, 
+            model_dir=model_dir, 
+            render_dir=render_dir, 
+            train=True, 
+            cuda=args.cuda
+        )
+    else:
+        models = [
+            spawn_ai(args.algo, env, handles[0], args.algo + '-me', args.max_steps, args.cuda), 
+            random_agent(handles[1], args.max_steps, args.cuda)
+        ]
+        runner = tools.RunnerRandom(
+            env, 
+            handles, 
+            args.max_steps, 
+            models, 
+            play,
+            render_every=args.save_every if args.render else 0, 
+            save_every=args.save_every, 
+            log_name=args.algo,
+            log_dir=log_dir, 
+            model_dir=model_dir, 
+            render_dir=render_dir, 
+            train=True, 
+            cuda=args.cuda
+        )
     for k in range(start_from, start_from + args.n_round):
         eps = linear_decay(k, [0, int(args.n_round * 0.8), args.n_round], [1, 0.2, 0.1])
         runner.run(eps, k)
