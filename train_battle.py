@@ -1,99 +1,74 @@
+"""Self Play with MAgent2 Battle V4 Environment"""
+import argparse
+import os
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 import numpy as np
 from magent2.environments import battle_v4
-from qmix import QMIX
-from replay_buffer import ReplayBuffer
-import yaml
+from algo import spawn_ai
+from algo import tools
+from senarios.senario_battle import play
 
-def load_args_from_yaml(yaml_path):
-    with open(yaml_path, 'r') as file:
-        data = yaml.safe_load(file)
-        return data['args']  # Access the 'args' dictionary directly
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+os.makedirs('./data', exist_ok=True)
 
-
-def preprocess_env(env):
-    env.reset()
-    env_agents = env.possible_agents
-    obs_spaces = env.observation_space(env_agents[0]).shape[0]
-    state_spaces = obs_spaces * len(env_agents)
-    num_actions = env.action_space(env_agents[0]).n
-    return obs_spaces, state_spaces, num_actions, env_agents
-
-def run_episode(env, agents, qmix, buffer, args):
-    env.reset()
-    terminated = False
-    episode_steps = 0
-    obs_dict = {agent: env.observe(agent) for agent in agents}
-    obs = np.array([obs_dict[agent] for agent in agents])
-
-    episode_batch = {
-        'o': [],
-        'u': [],
-        'r': [],
-        'o_next': [],
-        'terminated': [],
-    }
-    
-    while not terminated:
-        actions = []
-        for agent_id in range(len(agents)):
-            obs_agent = torch.tensor(obs[agent_id], dtype=torch.float32).unsqueeze(0)
-            if args['cuda']:
-                obs_agent = obs_agent.cuda()
-            q_values, _ = qmix.eval_rnn(obs_agent, qmix.eval_hidden[agent_id].unsqueeze(0))
-            action = torch.argmax(q_values).item()
-            actions.append(action)
-
-        action_dict = {agents[i]: actions[i] for i in range(len(agents))}
-        next_obs_dict, rewards, dones, _ = env.step(action_dict)
-        next_obs = np.array([next_obs_dict[agent] for agent in agents])
-        reward = np.array([rewards[agent] for agent in agents])
-        terminated = any(dones.values())
-
-        episode_batch['o'].append(obs)
-        episode_batch['u'].append(actions)
-        episode_batch['r'].append(reward)
-        episode_batch['o_next'].append(next_obs)
-        episode_batch['terminated'].append([terminated] * len(agents))
-
-        obs = next_obs
-        episode_steps += 1
-        if episode_steps >= args['max_episode_steps']:
+def linear_decay(epoch, x, y):
+    min_v, max_v = y[0], y[-1]
+    start, end = x[0], x[-1]
+    if epoch == start:
+        return min_v
+    eps = min_v
+    for i, x_i in enumerate(x):
+        if epoch <= x_i:
+            interval = (y[i] - y[i - 1]) / (x_i - x[i - 1])
+            eps = interval * (epoch - x[i - 1]) + y[i - 1]
             break
+    return eps
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--algo', type=str, choices={'ac', 'mfac', 'mfq', 'iql', 'qmix'}, help='choose an algorithm from the preset', required=True)
+    parser.add_argument('--save_every', type=int, default=20, help='decide the self-play update interval')
+    parser.add_argument('--update_every', type=int, default=5, help='decide the update interval for q-learning, optional')
+    parser.add_argument('--n_round', type=int, default=600, help='set the training round')
+    parser.add_argument('--render', action='store_true', help='render or not (if true, will render every save)')
+    parser.add_argument('--map_size', type=int, default=45, help='set the size of map')  # then the amount of agents is 64
+    parser.add_argument('--max_steps', type=int, default=400, help='set the max steps')
+    parser.add_argument('--cuda', type=bool, default=True, help='use the cuda')
+    args = parser.parse_args()
+
+    # init env
+    env = battle_v4.env(map_size=args.map_size,max_cycles = args.max_steps ,render_mode="rgb_array")
+
+    handles = env.unwrapped.env.get_handles()
+    log_dir = os.path.join(BASE_DIR, 'data/tmp/{}'.format(args.algo))
+    render_dir = os.path.join(BASE_DIR, 'data/render/{}'.format(args.algo))
+    model_dir = os.path.join(BASE_DIR, 'data/models/{}'.format(args.algo))
     
-    buffer.store_episode(episode_batch)
+    start_from = 0
+    models = [
+        spawn_ai(args.algo, env, handles[0], args.algo + '-me', args.max_steps, args.cuda), 
+        spawn_ai(args.algo, env, handles[1], args.algo + '-opponent', args.max_steps, args.cuda)
+    ]
 
-def train_qmix(qmix, buffer, args):
-    if buffer.current_size < args['batch_size']:
-        return
-    batch = buffer.sample(args['batch_size'])
-    qmix.learn(batch, args['max_episode_steps'], args['train_step'])
-    args['train_step'] += 1
+    runner = tools.Runner(
+        env, 
+        handles, 
+        args.max_steps, 
+        models, 
+        play,
+        render_every=args.save_every if args.render else 0, 
+        save_every=args.save_every, 
+        tau=0.01, 
+        log_name=args.algo,
+        log_dir=log_dir, 
+        model_dir=model_dir, 
+        render_dir=render_dir, 
+        train=True, 
+        cuda=args.cuda
+    )
 
-def main():
-    # Load configuration from YAML
-    args = load_args_from_yaml("/content/MARL/application.yaml")
-
-    # Make sure to update certain values that might not be in the YAML file
-    env = battle_v4.env(map_size=45, render_mode=None)
-    obs_spaces, state_spaces, num_actions, agents = preprocess_env(env)
-
-    args.update({
-        'obs_space': obs_spaces,
-        'state_space': state_spaces,
-        'num_actions': num_actions
-    })
-
-    buffer = ReplayBuffer(args)
-    qmix = QMIX(args, ["qmix_net", "rnn_net"], logger=None)
-
-    num_episodes = 5000
-    for episode in range(num_episodes):
-        run_episode(env, agents, qmix, buffer, args)
-        train_qmix(qmix, buffer, args)
-
-        if episode % 100 == 0:
-            print(f"Episode {episode}/{num_episodes} completed")
-
-if __name__ == "__main__":
-    main()
+    for k in range(start_from, start_from + args.n_round):
+        eps = linear_decay(k, [0, int(args.n_round * 0.8), args.n_round], [1, 0.2, 0.1])
+        runner.run(eps, k)
