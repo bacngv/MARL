@@ -407,10 +407,15 @@ class RunnerRandom(object):
         if self.train:
             print('\n[INFO] {}'.format(info['main']))
 
-            # Save the model if the performance is good
+            # if self.save_every and (iteration + 1) % self.save_every == 0:
             if info['main']['total_reward'] > info['opponent']['total_reward']:
-                print(Color.INFO.format('\n[INFO] Saving model ...'))
+                print(Color.INFO.format('\n[INFO] Begin Update ...'))
+                self.sp_op()
+                print(Color.INFO.format('[INFO] Updated!\n'))
+
+                print(Color.INFO.format('[INFO] Saving model ...'))
                 self.models[0].save(self.model_dir + '-0', iteration)
+                self.models[1].save(self.model_dir + '-1', iteration)
 
         else:
             print('\n[INFO] {0} \n {1}'.format(info['main'], info['opponent']))
@@ -427,3 +432,4 @@ class RunnerRandom(object):
             clip = ImageSequenceClip(render_list, fps=35)
             clip.write_gif('{}/replay_{}.gif'.format(self.render_dir, iteration+1), fps=20, verbose=False)
             print('[*] Saved Render')
+            
