@@ -245,8 +245,9 @@ class MemoryGroup(object):
 
 class Runner(object):
     def __init__(self, env, handles, max_steps, models,
-                play_handle, render_every=None, save_every=None, log_name=None, 
-                log_dir=None, model_dir=None, render_dir=None, train=False, cuda=True):
+                play_handle, render_every=None, save_every=None, tau=0.001, 
+                log_name=None, log_dir=None, model_dir=None, render_dir=None, 
+                train=False, cuda=True):
         self.env = env
         self.models = models
         self.max_steps = max_steps
@@ -257,16 +258,26 @@ class Runner(object):
         self.model_dir = model_dir
         self.render_dir = render_dir
         self.train = train
+        self.tau = tau
         self.cuda = cuda
         
         os.makedirs(self.render_dir, exist_ok=True)
-
+        
+    def should_do_soft_update(self):
+        """Check if models are of the same type for soft update"""
+        return (type(self.models[0]) == type(self.models[1]))
+    
+    def sp_op(self):
+        """Perform soft update from main model to opponent model"""
+        l_vars, r_vars = self.models[0].get_all_params(), self.models[1].get_all_params()
+        for l_var, r_var in zip(l_vars, r_vars):
+            r_var.detach().copy_((1. - self.tau) * l_var + self.tau * r_var)
+            
     def run(self, variant_eps, iteration, win_cnt=None):
         info = {'main': None, 'opponent': None}
-
         info['main'] = {'ave_agent_reward': 0., 'total_reward': 0., 'kill': 0.}
         info['opponent'] = {'ave_agent_reward': 0., 'total_reward': 0., 'kill': 0.}
-
+        
         max_nums, nums, agent_r_records, total_rewards, render_list = self.play(
             env=self.env, 
             n_round=iteration, 
@@ -278,17 +289,22 @@ class Runner(object):
             train=self.train, 
             cuda=self.cuda
         )
-
+        
         for i, tag in enumerate(['main', 'opponent']):
             info[tag]['total_reward'] = total_rewards[i]
             info[tag]['kill'] = max_nums[i] - nums[1 - i]
             info[tag]['ave_agent_reward'] = agent_r_records[i]
-
+            
         if self.train:
             print('\n[INFO] Main: {} \nOpponent: {}'.format(info['main'], info['opponent']))
-
-            # Save main model if it performs better
+            
             if info['main']['total_reward'] > info['opponent']['total_reward']:
+                # Check if models are of same type before soft update
+                if self.should_do_soft_update():
+                    print('[INFO] Models are of same type - performing soft update...')
+                    self.sp_op()
+                    print('[INFO] Soft update completed')
+                
                 print('[INFO] Saving main model...')
                 self.models[0].save(self.model_dir + '-main', iteration)
                 
@@ -311,5 +327,4 @@ class Runner(object):
             clip = ImageSequenceClip(render_list, fps=35)
             clip.write_gif('{}/replay_{}.gif'.format(self.render_dir, iteration+1), fps=20, verbose=False)
             print('[*] Saved Render')
-
             
