@@ -101,7 +101,7 @@ if __name__ == "__main__":
         red_model_path=args.red_path,
         blue_model_path=args.blue_path,
         render_dir=RENDER_DIR,
-        map_size=40,
+        map_size=80,
         max_steps=800,
         use_cuda=args.cuda 
     )
