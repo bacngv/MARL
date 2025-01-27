@@ -91,7 +91,7 @@ if __name__ == "__main__":
     parser.add_argument('--cuda', type=bool, default=True, help='use cuda')
     args = parser.parse_args()
 
-    RENDER_DIR = "data"  
+    RENDER_DIR = "assets"  
     
     run_battle_with_red_opponent(
         red_algo=args.red_algo,

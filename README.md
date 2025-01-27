@@ -1,10 +1,13 @@
 # MARL 
 
+## IQL defeats MFQ after 120 episodes of training with a random opponent
+![IQL_vs_MFQ](assets/iql_vs_mfq.gif)
+
 ## How to run
-Checkout the [PIPELINE](https://colab.research.google.com/drive/1mYrtfrhfxD1EnnA1lmpu4guv8vAYJ1he) for a comprehensive overview of running the agent in the MAgent2 environment.
+Check out the [PIPELINE](https://colab.research.google.com/drive/1mYrtfrhfxD1EnnA1lmpu4guv8vAYJ1he) for a comprehensive overview of running the agent in the MAgent2 environment.
 
 ## Installation
-clone this repo and install with
+Clone this repo and install with:
 ```
 pip install -r requirements.txt
 ```
