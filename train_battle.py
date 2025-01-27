@@ -67,7 +67,7 @@ if __name__ == '__main__':
     parser.add_argument('--update_every', type=int, default=5, help='decide the update interval for q-learning, optional')
     parser.add_argument('--n_round', type=int, default=600, help='set the training round')
     parser.add_argument('--render', action='store_true', help='render or not (if true, will render every save)')
-    parser.add_argument('--map_size', type=int, default=50, help='set the size of map') 
+    parser.add_argument('--map_size', type=int, default=80, help='set the size of map') 
     parser.add_argument('--max_steps', type=int, default=400, help='set the max steps')
     parser.add_argument('--cuda', type=bool, default=True, help='use cuda')
     args = parser.parse_args()
@@ -111,4 +111,3 @@ if __name__ == '__main__':
     for k in range(start_from, start_from + args.n_round):
         eps = linear_decay(k, [0, int(args.n_round * 0.8), args.n_round], [1, 0.2, 0.1])
         runner.run(eps, k)
-        
