@@ -1,9 +1,6 @@
-"""Battle Training with Flexible Opponent Selection"""
 import argparse
 import os
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 import numpy as np
 from magent2.environments import battle_v4
 from algo import spawn_ai
@@ -18,19 +15,13 @@ class RandomAgent:
         self.num_actions = num_actions
 
     def act(self, obs, feature=None, prob=None, eps=0):
-        # Convert tensor to numpy if needed
         if isinstance(obs, torch.Tensor):
             obs = obs.cpu().numpy()
         
-        # Handle batch dimension
         if len(obs.shape) > 3:
             return np.random.randint(0, self.num_actions, size=obs.shape[0])
         
-        # Default case
         return np.array([np.random.randint(0, self.num_actions)])
-
-    def save(self, dir_path, step):
-        pass
 
     def train(self):
         pass
@@ -51,18 +42,10 @@ def linear_decay(epoch, x, y):
             break
     return eps
 
-def create_opponent(opponent_type, env, handles, max_steps, cuda):
-    """Create opponent based on specified type"""
-    if opponent_type == 'random':
-        num_actions = env.env.get_action_space(handles[1])[0]
-        return RandomAgent(num_actions)
-    else:
-        return spawn_ai(opponent_type, env, handles[1], f'{opponent_type}-opponent', max_steps, cuda)
-
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--algo', type=str, choices={'ac', 'mfac', 'mfq', 'iql'}, help='algorithm for main agent', required=True)
-    parser.add_argument('--opponent', type=str, choices={'random', 'ac', 'mfac', 'mfq', 'iql'}, help='opponent type (random or algorithm)', required=True)
+    parser.add_argument('--self_play', action='store_true', help='use self-play training instead of random opponent')
     parser.add_argument('--save_every', type=int, default=20, help='decide the save interval')
     parser.add_argument('--update_every', type=int, default=5, help='decide the update interval for q-learning, optional')
     parser.add_argument('--n_round', type=int, default=600, help='set the training round')
@@ -74,21 +57,24 @@ if __name__ == '__main__':
 
     # Initialize environment
     env = battle_v4.env(map_size=args.map_size, max_cycles=args.max_steps, render_mode="rgb_array")
-    env = env.unwrapped  # Get the underlying environment
+    env = env.unwrapped
     handles = env.env.get_handles()
 
-    # Create directory paths based on main algorithm and opponent type
-    base_log_dir = os.path.join(BASE_DIR, 'data/tmp/{}_{}'.format(args.algo, args.opponent))
-    base_render_dir = os.path.join(BASE_DIR, 'data/render/{}_{}'.format(args.algo, args.opponent))
-    base_model_dir = os.path.join(BASE_DIR, 'data/models/{}_{}'.format(args.algo, args.opponent))
-    
-    start_from = 0
+    # Set up directories
+    opponent_type = 'self' if args.self_play else 'random'
+    base_log_dir = os.path.join(BASE_DIR, f'data/tmp/{args.algo}_{opponent_type}')
+    base_render_dir = os.path.join(BASE_DIR, f'data/render/{args.algo}_{opponent_type}')
+    base_model_dir = os.path.join(BASE_DIR, f'data/models/{args.algo}_{opponent_type}')
     
     # Create main agent
     main_model = spawn_ai(args.algo, env, handles[0], args.algo + '-main', args.max_steps, args.cuda)
     
-    # Create opponent (random or algorithm-based)
-    opponent_model = create_opponent(args.opponent, env, handles, args.max_steps, args.cuda)
+    # Create opponent based on mode
+    if args.self_play:
+        opponent_model = spawn_ai(args.algo, env, handles[1], args.algo + '-opponent', args.max_steps, args.cuda)
+    else:
+        num_actions = env.env.get_action_space(handles[1])[0]
+        opponent_model = RandomAgent(num_actions)
     
     models = [main_model, opponent_model]
 
@@ -100,7 +86,7 @@ if __name__ == '__main__':
         play,
         render_every=args.save_every if args.render else 0, 
         save_every=args.save_every, 
-        log_name=f"{args.algo}_{args.opponent}",
+        log_name=f"{args.algo}_{opponent_type}",
         log_dir=base_log_dir, 
         model_dir=base_model_dir, 
         render_dir=base_render_dir, 
@@ -108,6 +94,7 @@ if __name__ == '__main__':
         cuda=args.cuda
     )
 
-    for k in range(start_from, start_from + args.n_round):
+    for k in range(args.n_round):
         eps = linear_decay(k, [0, int(args.n_round * 0.8), args.n_round], [1, 0.2, 0.1])
         runner.run(eps, k)
+        

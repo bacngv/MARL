@@ -243,6 +243,9 @@ class MemoryGroup(object):
     def nb_entries(self):
         return len(self.obs0)
 
+import os
+from moviepy.editor import ImageSequenceClip
+
 class Runner(object):
     def __init__(self, env, handles, max_steps, models,
                 play_handle, render_every=None, save_every=None, tau=0.001, 
@@ -263,12 +266,15 @@ class Runner(object):
         
         os.makedirs(self.render_dir, exist_ok=True)
         
-    def should_do_soft_update(self):
-        """Check if models are of the same type for soft update"""
-        return (type(self.models[0]) == type(self.models[1]))
+    def is_self_play(self):
+        """Check if we're in self-play mode"""
+        return hasattr(self.models[1], 'save')
     
-    def sp_op(self):
-        """Perform soft update from main model to opponent model"""
+    def soft_update(self):
+        """Perform soft update from main model to opponent model in self-play"""
+        if not self.is_self_play():
+            return
+            
         l_vars, r_vars = self.models[0].get_all_params(), self.models[1].get_all_params()
         for l_var, r_var in zip(l_vars, r_vars):
             r_var.detach().copy_((1. - self.tau) * l_var + self.tau * r_var)
@@ -299,17 +305,17 @@ class Runner(object):
             print('\n[INFO] Main: {} \nOpponent: {}'.format(info['main'], info['opponent']))
             
             if info['main']['total_reward'] > info['opponent']['total_reward']:
-                # Check if models are of same type before soft update
-                if self.should_do_soft_update():
-                    print('[INFO] Models are of same type - performing soft update...')
-                    self.sp_op()
+                # Only perform soft update in self-play mode
+                if self.is_self_play():
+                    print('[INFO] Self-play mode - performing soft update...')
+                    self.soft_update()
                     print('[INFO] Soft update completed')
                 
                 print('[INFO] Saving main model...')
                 self.models[0].save(self.model_dir + '-main', iteration)
                 
-                # Save opponent model only if it's not random
-                if hasattr(self.models[1], 'save'):
+                # Save opponent model only in self-play mode
+                if self.is_self_play():
                     print('[INFO] Saving opponent model...')
                     self.models[1].save(self.model_dir + '-opponent', iteration)
         else:
