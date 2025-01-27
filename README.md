@@ -1,7 +1,10 @@
 # MARL 
 
-## IQL defeats MFQ after 120 episodes of training with a random opponent
-![IQL_vs_MFQ](assets/iql_vs_mfq.gif)
+### IQL defeats MFQ after 120 episodes of training with a random opponent
+
+<div style="text-align: center;">
+  <img src="assets/iql_vs_mfq.gif" alt="IQL_vs_MFQ" style="width: 45%; display: block; margin: 0 auto;">
+</div>
 
 ## How to run
 Check out the [PIPELINE](https://colab.research.google.com/drive/1mYrtfrhfxD1EnnA1lmpu4guv8vAYJ1he) for a comprehensive overview of running the agent in the MAgent2 environment.
