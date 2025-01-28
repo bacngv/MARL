@@ -44,13 +44,13 @@ def linear_decay(epoch, x, y):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--algo', type=str, choices={'ac', 'mfac', 'mfq', 'iql'}, help='algorithm for main agent', required=True)
+    parser.add_argument('--algo', type=str, choices={'ac', 'mfac', 'mfq', 'iql', 'qmix'}, help='algorithm for main agent', required=True)
     parser.add_argument('--self_play', action='store_true', help='use self-play training instead of random opponent')
     parser.add_argument('--save_every', type=int, default=20, help='decide the save interval')
     parser.add_argument('--update_every', type=int, default=5, help='decide the update interval for q-learning, optional')
     parser.add_argument('--n_round', type=int, default=600, help='set the training round')
     parser.add_argument('--render', action='store_true', help='render or not (if true, will render every save)')
-    parser.add_argument('--map_size', type=int, default=80, help='set the size of map') 
+    parser.add_argument('--map_size', type=int, default=40, help='set the size of map') 
     parser.add_argument('--max_steps', type=int, default=400, help='set the max steps')
     parser.add_argument('--cuda', type=bool, default=True, help='use cuda')
     args = parser.parse_args()
