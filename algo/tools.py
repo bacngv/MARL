@@ -19,68 +19,6 @@ class Buffer:
     def push(self, **kwargs):
         raise NotImplementedError
     
-class ReplayBuffer:
-    def __init__(self, args):
-        self.args = args
-        self.size = args['buffer_size']
-        self.episode_limit = args['max_episode_steps']
-        self.num_agents = args['num_agents']
-        self.num_actions = args['num_actions']
-        self.obs_space = args['obs_space']
-        self.state_space = args['state_space']
-        
-        # Initialize buffer storage
-        self.buffers = {
-            'o': np.empty([self.size, self.episode_limit, self.num_agents, self.obs_space]),
-            'u': np.empty([self.size, self.episode_limit, self.num_agents, 1]),
-            's': np.empty([self.size, self.episode_limit, self.state_space]),
-            'r': np.empty([self.size, self.episode_limit, self.num_agents]),
-            'o_next': np.empty([self.size, self.episode_limit, self.num_agents, self.obs_space]),
-            's_next': np.empty([self.size, self.episode_limit, self.state_space]),
-            'avail_u': np.empty([self.size, self.episode_limit, self.num_agents, self.num_actions]),
-            'avail_u_next': np.empty([self.size, self.episode_limit, self.num_agents, self.num_actions]),
-            'u_onehot': np.empty([self.size, self.episode_limit, self.num_agents, self.num_actions]),
-            'padded': np.empty([self.size, self.episode_limit, 1]),
-            'terminated': np.empty([self.size, self.episode_limit, 1])
-        }
-        
-        self.current_idx = 0
-        self.current_size = 0
-        self.lock = threading.Lock()
-        
-    def store_episode(self, episode_batch):
-        batch_size = episode_batch['o'].shape[0]
-        with self.lock:
-            idxs = self._get_storage_idx(inc=batch_size)
-            
-            for key in self.buffers.keys():
-                self.buffers[key][idxs] = episode_batch[key]
-                
-    def sample(self, batch_size):
-        temp_buffer = {}
-        idx = np.random.randint(0, self.current_size, batch_size)
-        for key in self.buffers.keys():
-            temp_buffer[key] = self.buffers[key][idx]
-        return temp_buffer
-        
-    def _get_storage_idx(self, inc=None):
-        inc = inc or 1
-        if self.current_idx + inc <= self.size:
-            idx = np.arange(self.current_idx, self.current_idx + inc)
-            self.current_idx += inc
-        elif self.current_idx < self.size:
-            overflow = inc - (self.size - self.current_idx)
-            idx_a = np.arange(self.current_idx, self.size)
-            idx_b = np.arange(0, overflow)
-            idx = np.concatenate([idx_a, idx_b])
-            self.current_idx = overflow
-        else:
-            idx = np.arange(0, inc)
-            self.current_idx = inc
-        self.current_size = min(self.size, self.current_size + inc)
-        if inc == 1:
-            idx = idx[0]
-        return idx
 
 class MetaBuffer(object):
     def __init__(self, shape, max_len, dtype='float32'):
