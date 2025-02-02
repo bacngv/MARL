@@ -1,12 +1,14 @@
 from . import q_learning
 from . import ac
 from . import qmix
+from . import mappo
 
 IQL = q_learning.DQN
 MFQ = q_learning.MFQ
 AC = ac.ActorCritic
 MFAC = ac.MFAC
 QMIX = qmix.QMIX
+MAPPO = mappo.MAPPOPolicy
 
 
 def spawn_ai(algo_name, env, handle, human_name, max_steps, cuda=True):
@@ -20,6 +22,8 @@ def spawn_ai(algo_name, env, handle, human_name, max_steps, cuda=True):
         model = MFAC(env, human_name, handle, use_cuda=cuda)
     elif algo_name == 'qmix':
         model = QMIX(env, human_name, handle, use_cuda=cuda)
+    elif algo_name == 'mappo':
+        model = MAPPO(env, human_name, handle, use_cuda=cuda)
     if cuda:
         model = model.cuda()
     return model
