@@ -4,6 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import threading
+from tools import QMixReplayBuffer
 from . import base
 
 
@@ -11,20 +12,38 @@ class RNNAgent(nn.Module):
     def __init__(self, input_shape, args):
         super(RNNAgent, self).__init__()
         self.args = args
+        # Assuming input_shape is (channels, height, width)
+        input_size = input_shape[0] * input_shape[1]
         
-        # Convert input_shape to int if it's a tuple
-        if isinstance(input_shape, tuple):
-            input_shape = input_shape[0]
-            
-        self.fc1 = nn.Linear(input_shape, args['rnn_hidden_dim'])
+        self.fc1 = nn.Linear(input_size, args['rnn_hidden_dim'])
         self.rnn = nn.GRUCell(args['rnn_hidden_dim'], args['rnn_hidden_dim'])
         self.fc2 = nn.Linear(args['rnn_hidden_dim'], args['num_actions'])
         
     def forward(self, inputs, hidden_state):
-        x = F.relu(self.fc1(inputs))
-        h_in = hidden_state.reshape(-1, self.args['rnn_hidden_dim'])
+        # Print input shape for debugging
+        #print(f"Input shape: {inputs.shape}")
+        
+        batch_size, channels, height, width= inputs.shape
+        
+        # Reshape inputs to (batch_size * num_agents, channels * height * width)
+        x = inputs.reshape(batch_size * channels, height * width)
+        #print(f"Reshaped x shape: {x.shape}")
+        
+        # Apply first layer
+        x = F.relu(self.fc1(x))
+        
+        # Prepare hidden state
+        h_in = hidden_state.reshape(batch_size * channels, -1)
+        
+        # Process through RNN
         h = self.rnn(x, h_in)
+        
+        # Reshape hidden state
+        h = h.reshape(batch_size, channels, -1)
+        
+        # Get Q-values
         q = self.fc2(h)
+        
         return q, h
 
 class QMixNet(nn.Module):
@@ -57,67 +76,6 @@ class QMixNet(nn.Module):
         q_total = torch.bmm(hidden, w2) + b2
         return q_total.view(batch_size, -1, 1)
 
-class ReplayBuffer:
-    def __init__(self, args):
-        self.args = args
-        self.size = args['buffer_size']
-        self.episode_limit = args['max_episode_steps']
-        self.num_agents = args['num_agents']
-        self.num_actions = args['num_actions']
-        self.obs_space = args['obs_space']
-        self.state_space = args['state_space']
-        
-        self.buffers = {
-            'o': np.empty([self.size, self.episode_limit, self.num_agents, self.obs_space]),
-            'u': np.empty([self.size, self.episode_limit, self.num_agents, 1]),
-            's': np.empty([self.size, self.episode_limit, self.state_space]),
-            'r': np.empty([self.size, self.episode_limit, self.num_agents]),
-            'o_next': np.empty([self.size, self.episode_limit, self.num_agents, self.obs_space]),
-            's_next': np.empty([self.size, self.episode_limit, self.state_space]),
-            'avail_u': np.empty([self.size, self.episode_limit, self.num_agents, self.num_actions]),
-            'avail_u_next': np.empty([self.size, self.episode_limit, self.num_agents, self.num_actions]),
-            'u_onehot': np.empty([self.size, self.episode_limit, self.num_agents, self.num_actions]),
-            'padded': np.empty([self.size, self.episode_limit, 1]),
-            'terminated': np.empty([self.size, self.episode_limit, 1])
-        }
-        
-        self.current_idx = 0
-        self.current_size = 0
-        self.lock = threading.Lock()
-
-    def store_episode(self, episode_batch):
-        batch_size = episode_batch['o'].shape[0]
-        with self.lock:
-            idxs = self._get_storage_idx(inc=batch_size)
-            for key in self.buffers.keys():
-                self.buffers[key][idxs] = episode_batch[key]
-
-    def sample(self, batch_size):
-        temp_buffer = {}
-        idx = np.random.randint(0, self.current_size, batch_size)
-        for key in self.buffers.keys():
-            temp_buffer[key] = self.buffers[key][idx]
-        return temp_buffer
-
-    def _get_storage_idx(self, inc=None):
-        inc = inc or 1
-        if self.current_idx + inc <= self.size:
-            idx = np.arange(self.current_idx, self.current_idx + inc)
-            self.current_idx += inc
-        elif self.current_idx < self.size:
-            overflow = inc - (self.size - self.current_idx)
-            idx_a = np.arange(self.current_idx, self.size)
-            idx_b = np.arange(0, overflow)
-            idx = np.concatenate([idx_a, idx_b])
-            self.current_idx = overflow
-        else:
-            idx = np.arange(0, inc)
-            self.current_idx = inc
-        self.current_size = min(self.size, self.current_size + inc)
-        if inc == 1:
-            idx = idx[0]
-        return idx
-
 class QMIX(base.ValueNet):
     def __init__(self, env, name, handle, use_cuda=False, memory_size=2**10, batch_size=64, 
                  update_every=5, learning_rate=1e-4, tau=0.005, gamma=0.95):
@@ -127,9 +85,9 @@ class QMIX(base.ValueNet):
         
         self.args = {
             'num_actions': 21,
-            'num_agents': 64,
-            'state_space': 9075,
-            'obs_space': 605,
+            'num_agents': 81*2,
+            'state_space': 45*45*5,
+            'obs_space': 845,
             'rnn_hidden_dim': 32,
             'qmix_hidden_dim': 32,
             'batch_size': batch_size,
@@ -152,7 +110,7 @@ class QMIX(base.ValueNet):
         self.params = list(self.eval_rnn.parameters()) + list(self.eval_qmix.parameters())
         self.optimizer = torch.optim.RMSprop(self.params, lr=learning_rate)
         
-        self.replay_buffer = ReplayBuffer(self.args)
+        self.replay_buffer = QMixReplayBuffer(self.args)
         self.hidden_states = None
         
         # Add episode buffer to collect transitions before flushing
@@ -200,10 +158,7 @@ class QMIX(base.ValueNet):
         """
         for key in self.episode_buffer.keys():
             self.episode_buffer[key] = []
-    def init_hidden(self, batch_size):
-        self.hidden_states = torch.zeros(batch_size, self.args['num_agents'],
-                                       self.args['rnn_hidden_dim'])
-        
+
     def store_transition(self, **kwargs):
         self.replay_buffer.store_episode(kwargs)
         
@@ -225,8 +180,13 @@ class QMIX(base.ValueNet):
         terminated = torch.FloatTensor(batch['terminated']).to(device)
         mask = 1 - torch.FloatTensor(batch['padded']).to(device)
         
+        # Reshape obs to match the expected input shape
+        batch_size, max_episode_steps, num_agents, channels, height, width = obs.shape
+        obs = obs.reshape(batch_size * max_episode_steps, num_agents, channels, height, width)
+        obs_next = obs_next.reshape(batch_size * max_episode_steps, num_agents, channels, height, width)
+        
         # Initialize hidden states
-        self.init_hidden(self.args['batch_size'])
+        self.init_hidden(batch_size * max_episode_steps)
         self.hidden_states = self.hidden_states.to(device)
         
         # Get Q-values for all agents
@@ -275,7 +235,38 @@ class QMIX(base.ValueNet):
         self.update_cnt += 1
         
         return loss.item()
+    
+    def init_hidden(self, batch_size):
+        # Create hidden states for each agent
+        self.hidden_states = torch.zeros(batch_size, self.args['num_agents'], 
+                                        self.args['rnn_hidden_dim'], 
+                                        device=self.device)
+
+    def act(self, obs, feature, prob, eps=0):
+        # Ensure obs is on the correct device
+        obs = obs.to(self.device)
+        batch_size, num_agents, height, width = obs.shape
         
+        # Initialize hidden states with correct batch size and number of agents
+        self.hidden_states = torch.zeros(batch_size, num_agents, 
+                                        self.args['rnn_hidden_dim'], 
+                                        device=self.device)
+        
+        # Compute Q-values for each agent
+        q_values, self.hidden_states = self.eval_rnn(obs, self.hidden_states)
+        
+        # Action selection
+        actions = []
+        for i in range(batch_size):
+            for j in range(num_agents):
+                if np.random.rand() < eps:
+                    action = np.random.randint(0, self.args['num_actions'])
+                else:
+                    action = q_values[i, j].argmax().item()
+                actions.append(action)
+        
+        return np.array(actions).reshape(batch_size, num_agents)
+
     def _update_target_network(self):
         for param, target_param in zip(self.eval_rnn.parameters(), 
                                      self.target_rnn.parameters()):
