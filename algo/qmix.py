@@ -85,7 +85,7 @@ class QMIX(base.ValueNet):
         
         self.args = {
             'num_actions': 21,
-            'num_agents': 81*2,
+            'num_agents': 64*2,
             'state_space': 45*45*5,
             'obs_space': 845,
             'rnn_hidden_dim': 32,
