@@ -44,10 +44,8 @@ class EpisodesBuffer:
             probs = kwargs['prob']
 
         buffer = self.buffer
-        index = np.random.permutation(len(view))
 
         for i in range(len(ids)):
-            i = index[i]
             entry = buffer.get(ids[i])
             if entry is None:
                 entry = EpisodesBufferEntry()
