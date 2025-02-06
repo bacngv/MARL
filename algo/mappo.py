@@ -75,13 +75,13 @@ class Actor(nn.Module):
 
     def _construct_net(self):
         return nn.Sequential(
-            nn.Linear(self.obs_space, 512),  # Increased network capacity
-            nn.LayerNorm(512),
+            nn.Linear(self.obs_space, 256),  # Increased network capacity
+            nn.LayerNorm(256),
             nn.ReLU(),  # Changed to ReLU for better gradient flow
-            nn.Linear(512, 512),
-            nn.LayerNorm(512),
+            nn.Linear(256, 256),
+            nn.LayerNorm(256),
             nn.ReLU(),
-            nn.Linear(512, self.act_space)
+            nn.Linear(256, self.act_space)
         )
     
     def _init_weights(self):
@@ -93,21 +93,26 @@ class Actor(nn.Module):
     def forward(self, obs, rnn_states, masks, available_actions=None, deterministic=False):
         action_logits = self.net(obs)
         
+        # Check for NaNs in the network output
+        assert not torch.isnan(action_logits).any(), "NaNs found in actor network output"
+        
         # Apply action masking if available
         if available_actions is not None:
             action_logits = action_logits.masked_fill(~available_actions, float('-inf'))
         
         # Reduce temperature for more deterministic behavior
-        temperature = 0.5  # Changed from 1.0
+        temperature = 1.0  # Changed from 1.0
         action_probs = F.softmax(action_logits / temperature, dim=-1)
         
         dist = torch.distributions.Categorical(action_probs)
         
         if deterministic:
-            actions = torch.argmax(action_probs, dim=-1)
+            action_probs = F.softmax(action_logits / temperature, dim=-1)
+            action_probs = torch.clamp(action_probs, min=1e-8, max=1.0)  # Prevent zero probabilities
+            action_probs = action_probs / action_probs.sum(dim=-1, keepdim=True)
         else:
             # Add epsilon-greedy exploration
-            epsilon = 0.1
+            epsilon = 0.001
             if np.random.random() < epsilon:
                 actions = torch.randint(0, self.act_space, (obs.shape[0],)).to(obs.device)
             else:
@@ -148,15 +153,15 @@ class Critic(nn.Module):
 
 class MAPPOPolicy(nn.Module):
     def __init__(self, env, name, handle, value_coef=0.5, ent_coef=0.01, gamma=0.99, 
-                 batch_size=256,  # Increased batch size
-                 learning_rate=3e-4,  # Adjusted learning rate
+                 batch_size=128,  # Increased batch size
+                 learning_rate=1e-4,  # Adjusted learning rate
                  use_cuda=False, 
-                 clip_epsilon=0.2, 
-                 ppo_epochs=10,
-                 minibatch_size=64,
+                 clip_epsilon=1.0, 
+                 ppo_epochs=4,
+                 minibatch_size=32,
                  max_grad_norm=0.5,
-                 gae_lambda=0.95,
-                 reward_scaling=1.0):  # Increased reward scaling
+                 gae_lambda=0.99,
+                 reward_scaling=2.5):  # Increased reward scaling
         super(MAPPOPolicy, self).__init__()
         
         self.env = env
@@ -331,7 +336,7 @@ class MAPPOPolicy(nn.Module):
         # Apply reward scaling and clipping
         scaled_rewards = np.clip(
             np.array(episode.rewards, dtype=np.float32) * self.reward_scaling,
-            -10.0, 10.0  # Clip rewards to prevent extreme values
+            -10000.0, 10000.0  # Clip rewards to prevent extreme values
         )
         
         # Get value estimates for all states
