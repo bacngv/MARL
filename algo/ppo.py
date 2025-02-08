@@ -142,8 +142,55 @@ class Critic(nn.Module):
     def forward(self, cent_obs, rnn_states, masks):
         values = self.net(cent_obs)
         return values, rnn_states
+    
+class TrainingLogger:
+    def __init__(self):
+        self.rewards = []
+        self.losses = []
+        self.actor_losses = []
+        self.critic_losses = []
+        self.entropy_losses = []
+        self.kl_divergences = []
 
-class MAPPOPolicy(nn.Module):
+    def log_reward(self, reward):
+        self.rewards.append(reward)
+
+    def log_loss(self, loss):
+        self.losses.append(loss)
+
+    def log_actor_loss(self, actor_loss):
+        self.actor_losses.append(actor_loss)
+
+    def log_critic_loss(self, critic_loss):
+        self.critic_losses.append(critic_loss)
+
+    def log_entropy_loss(self, entropy_loss):
+        self.entropy_losses.append(entropy_loss)
+
+    def log_kl_divergence(self, kl_divergence):
+        self.kl_divergences.append(kl_divergence)
+
+    def save_logs(self, file_path):
+        logs = {
+            'rewards': self.rewards,
+            'losses': self.losses,
+            'actor_losses': self.actor_losses,
+            'critic_losses': self.critic_losses,
+            'entropy_losses': self.entropy_losses,
+            'kl_divergences': self.kl_divergences
+        }
+        torch.save(logs, file_path)
+
+    def load_logs(self, file_path):
+        logs = torch.load(file_path)
+        self.rewards = logs['rewards']
+        self.losses = logs['losses']
+        self.actor_losses = logs['actor_losses']
+        self.critic_losses = logs['critic_losses']
+        self.entropy_losses = logs['entropy_losses']
+        self.kl_divergences = logs['kl_divergences']
+
+class PPOPolicy(nn.Module):
     def __init__(self, env, name, handle, value_coef=0.5, ent_coef=0.01, gamma=0.99, 
                  batch_size=128,
                  learning_rate=1e-4,
@@ -154,7 +201,7 @@ class MAPPOPolicy(nn.Module):
                  max_grad_norm=0.5,
                  gae_lambda=0.99,
                  reward_scaling=2.5):
-        super(MAPPOPolicy, self).__init__()
+        super(PPOPolicy, self).__init__()
         
         self.env = env
         self.name = name
@@ -248,9 +295,17 @@ class MAPPOPolicy(nn.Module):
             advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
             advantages = torch.FloatTensor(advantages).to(device)
 
-        for _ in range(self.ppo_epochs):
+        # Initialize logger
+        logger = TrainingLogger()
+
+        for epoch in range(self.ppo_epochs):
             for batch in loader:
-                self._update_network(batch, advantages)
+                stop_early = self._update_network(batch, advantages, logger)
+                if stop_early:
+                    break
+
+        # Save logs after training
+        logger.save_logs('training_logs.pth')
 
     def _resize_buffers(self, n):
         buffers = [self.view_buf, self.feature_buf, self.action_buf, 
@@ -343,7 +398,7 @@ class MAPPOPolicy(nn.Module):
             torch.FloatTensor(log_probs).to(device)
         )
 
-    def _update_network(self, batch, advantages):
+    def _update_network(self, batch, advantages, logger):
         batch_view, batch_feat, batch_act, batch_ret, batch_old_logp = batch
         batch_size = batch_view.shape[0]
         advantages = advantages[:batch_size]
@@ -371,6 +426,12 @@ class MAPPOPolicy(nn.Module):
         entropy_loss = -self.ent_coef * entropy
         total_loss = policy_loss + value_loss + entropy_loss
         
+        # Log losses
+        logger.log_loss(total_loss.item())
+        logger.log_actor_loss(policy_loss.item())
+        logger.log_critic_loss(value_loss.item())
+        logger.log_entropy_loss(entropy_loss.item())
+        
         # optimize
         self.actor_optimizer.zero_grad()
         self.critic_optimizer.zero_grad()
@@ -385,6 +446,8 @@ class MAPPOPolicy(nn.Module):
         
         # calculate KL divergence for early stopping
         approx_kl = ((ratio - 1) - torch.log(ratio)).mean().item()
+        logger.log_kl_divergence(approx_kl)
+        
         if approx_kl > 0.015:
             return True
             
