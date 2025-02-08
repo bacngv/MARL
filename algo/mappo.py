@@ -75,9 +75,9 @@ class Actor(nn.Module):
 
     def _construct_net(self):
         return nn.Sequential(
-            nn.Linear(self.obs_space, 256),  # Increased network capacity
+            nn.Linear(self.obs_space, 256),
             nn.LayerNorm(256),
-            nn.ReLU(),  # Changed to ReLU for better gradient flow
+            nn.ReLU(),  
             nn.Linear(256, 256),
             nn.LayerNorm(256),
             nn.ReLU(),
@@ -93,25 +93,20 @@ class Actor(nn.Module):
     def forward(self, obs, rnn_states, masks, available_actions=None, deterministic=False):
         action_logits = self.net(obs)
         
-        # Check for NaNs in the network output
         assert not torch.isnan(action_logits).any(), "NaNs found in actor network output"
-        
-        # Apply action masking if available
+    
         if available_actions is not None:
             action_logits = action_logits.masked_fill(~available_actions, float('-inf'))
-        
-        # Reduce temperature for more deterministic behavior
-        temperature = 1.0  # Changed from 1.0
+        temperature = 1.0
         action_probs = F.softmax(action_logits / temperature, dim=-1)
         
         dist = torch.distributions.Categorical(action_probs)
         
         if deterministic:
             action_probs = F.softmax(action_logits / temperature, dim=-1)
-            action_probs = torch.clamp(action_probs, min=1e-8, max=1.0)  # Prevent zero probabilities
+            action_probs = torch.clamp(action_probs, min=1e-8, max=1.0) 
             action_probs = action_probs / action_probs.sum(dim=-1, keepdim=True)
         else:
-            # Add epsilon-greedy exploration
             epsilon = 0.001
             if np.random.random() < epsilon:
                 actions = torch.randint(0, self.act_space, (obs.shape[0],)).to(obs.device)
@@ -120,8 +115,6 @@ class Actor(nn.Module):
             
         action_log_probs = dist.log_prob(actions)
         return actions, action_log_probs, rnn_states
-
-# Modified Critic with layer normalization and better initialization
 class Critic(nn.Module):
     def __init__(self, cent_obs_space, device):
         super(Critic, self).__init__()
@@ -147,21 +140,20 @@ class Critic(nn.Module):
                 nn.init.orthogonal_(layer.weight, gain=1)
                 nn.init.constant_(layer.bias, 0)
     def forward(self, cent_obs, rnn_states, masks):
-        # Forward pass through the critic network
         values = self.net(cent_obs)
         return values, rnn_states
 
 class MAPPOPolicy(nn.Module):
     def __init__(self, env, name, handle, value_coef=0.5, ent_coef=0.01, gamma=0.99, 
-                 batch_size=128,  # Increased batch size
-                 learning_rate=1e-4,  # Adjusted learning rate
+                 batch_size=128,
+                 learning_rate=1e-4,
                  use_cuda=False, 
                  clip_epsilon=1.0, 
                  ppo_epochs=4,
                  minibatch_size=32,
                  max_grad_norm=0.5,
                  gae_lambda=0.99,
-                 reward_scaling=2.5):  # Increased reward scaling
+                 reward_scaling=2.5):
         super(MAPPOPolicy, self).__init__()
         
         self.env = env
@@ -184,27 +176,19 @@ class MAPPOPolicy(nn.Module):
         self.max_grad_norm = max_grad_norm
         self.gae_lambda = gae_lambda
         self.reward_scaling = reward_scaling
-
-        # Initialize buffers
         self.view_buf = np.empty([1,] + list(self.view_space))
         self.feature_buf = np.empty([1,] + [self.feature_space])
         self.action_buf = np.empty(1, dtype=np.int32)
         self.reward_buf = np.empty(1, dtype=np.float32)
         self.log_probs_buf = np.empty(1, dtype=np.float32)
         self.replay_buffer = EpisodesBuffer()
-
-        # Initialize actor and critic
         self.actor = Actor(np.prod(self.view_space) + self.feature_space, self.num_actions, device='cuda' if use_cuda else 'cpu')
         self.critic = Critic(np.prod(self.view_space) + self.feature_space, device='cuda' if use_cuda else 'cpu')
-
         self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=learning_rate)
         self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=learning_rate)
 
     def act(self, **kwargs):
-        # Get device 
         device = next(self.actor.parameters()).device
-        
-        # Move tensors to correct device
         if isinstance(kwargs['obs'], torch.Tensor):
             obs = kwargs['obs'].to(device).flatten(1)
         else:
@@ -218,8 +202,6 @@ class MAPPOPolicy(nn.Module):
         combined_input = torch.cat([obs, feature], dim=-1)
         
         actions, action_log_probs, _ = self.actor(combined_input, None, None)
-        
-        # Return only the action array for environment interaction
         if kwargs.get('return_log_prob', False):
             return actions.cpu().numpy().astype(np.int32), action_log_probs.detach().cpu().numpy()
         else:
@@ -242,30 +224,23 @@ class MAPPOPolicy(nn.Module):
         else:
             obs = torch.FloatTensor(obs).unsqueeze(0)
             feature = torch.FloatTensor(feature).unsqueeze(0)
-        
         combined_input = torch.cat([obs.flatten(1), feature], dim=-1)
-        
-        # Forward pass through the critic network
         values, _ = self.critic(combined_input, None, None)
         return values.detach().cpu().numpy()
 
     def train(self, cuda):
         batch_data = list(self.replay_buffer.episodes())
         self.replay_buffer.reset()
-        
-        # Process episodes
         n = sum(len(ep.rewards) for ep in batch_data)
         self._resize_buffers(n)
         
         view, feature, action, reward, log_probs = self._fill_buffers(batch_data)
-        
-        # Convert to tensors and move to appropriate device
         device = torch.device('cuda' if cuda else 'cpu')
         tensor_data = self._convert_to_tensors(view, feature, action, reward, log_probs)
         dataset = TensorDataset(*tensor_data)
         loader = DataLoader(dataset, batch_size=self.minibatch_size, shuffle=True)
         
-        # Calculate advantages
+        # calculate advantages
         with torch.no_grad():
             combined_input = torch.cat([tensor_data[0].flatten(1), tensor_data[1]], dim=-1)
             old_values = self.critic(combined_input, None, None)[0].flatten()
@@ -273,7 +248,6 @@ class MAPPOPolicy(nn.Module):
             advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
             advantages = torch.FloatTensor(advantages).to(device)
 
-        # Training loop
         for _ in range(self.ppo_epochs):
             for batch in loader:
                 self._update_network(batch, advantages)
@@ -297,22 +271,19 @@ class MAPPOPolicy(nn.Module):
         for episode in batch_data:
             m = len(episode.rewards)
             
-            # Calculate discounted returns and advantages
+            # calculate discounted returns and advantages
             returns, advantages = self._calculate_returns(episode)
             all_returns.extend(returns)
             all_advantages.extend(advantages)
             
-            # Fill buffers
+            # fill buffers
             self.view_buf[ct:ct+m] = episode.views
             self.feature_buf[ct:ct+m] = episode.features
             self.action_buf[ct:ct+m] = episode.actions
-            self.reward_buf[ct:ct+m] = returns  # Use only returns for reward buffer
-            
-            # Convert probs to log_probs if they exist
+            self.reward_buf[ct:ct+m] = returns
             if hasattr(episode, 'probs') and len(episode.probs) > 0:
                 self.log_probs_buf[ct:ct+m] = np.log(episode.probs)
             else:
-                # If no probs available, initialize with zeros or recalculate
                 views = torch.FloatTensor(episode.views)
                 features = torch.FloatTensor(episode.features)
                 
@@ -333,13 +304,11 @@ class MAPPOPolicy(nn.Module):
         returns = np.zeros_like(episode.rewards, dtype=np.float32)
         advantages = np.zeros_like(episode.rewards, dtype=np.float32)
         
-        # Apply reward scaling and clipping
+        # apply reward scaling and clipping
         scaled_rewards = np.clip(
             np.array(episode.rewards, dtype=np.float32) * self.reward_scaling,
-            -10000.0, 10000.0  # Clip rewards to prevent extreme values
+            -10000.0, 10000.0  
         )
-        
-        # Get value estimates for all states
         with torch.no_grad():
             values = []
             for i in range(len(episode.views)):
@@ -347,11 +316,11 @@ class MAPPOPolicy(nn.Module):
                 values.append(v)
             values = np.array(values, dtype=np.float32).flatten()
             
-        # Calculate GAE with normalization
+        # calculate GAE with normalization
         gae = 0
         for t in reversed(range(len(scaled_rewards))):
             if t == len(scaled_rewards) - 1:
-                next_value = 0 if episode.terminal else values[t]  # Handle terminal states properly
+                next_value = 0 if episode.terminal else values[t]  
             else:
                 next_value = values[t + 1]
                 
@@ -360,7 +329,6 @@ class MAPPOPolicy(nn.Module):
             advantages[t] = gae
             returns[t] = advantages[t] + values[t]
             
-        # Normalize advantages
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
             
         return returns, advantages
@@ -380,16 +348,10 @@ class MAPPOPolicy(nn.Module):
         batch_size = batch_view.shape[0]
         advantages = advantages[:batch_size]
         
-        # Normalize advantages batch-wise
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-        
         combined_input = torch.cat([batch_view.flatten(1), batch_feat], dim=-1)
-        
-        # Value loss with improved clipping
         values, _ = self.critic(combined_input, None, None)
         values = values.squeeze(-1)
-        
-        # Use PPO-style value clipping
         value_pred_clipped = batch_old_logp + torch.clamp(
             values - batch_old_logp,
             -self.clip_epsilon,
@@ -398,38 +360,30 @@ class MAPPOPolicy(nn.Module):
         value_losses = (values - batch_ret).pow(2)
         value_losses_clipped = (value_pred_clipped - batch_ret).pow(2)
         value_loss = self.value_coef * torch.max(value_losses, value_losses_clipped).mean()
-        
-        # Policy loss with improved ratio calculation
         dist = torch.distributions.Categorical(F.softmax(self.actor.net(combined_input), dim=-1))
         new_logp = dist.log_prob(batch_act)
-        
         ratio = torch.exp(new_logp - batch_old_logp)
-        ratio = torch.clamp(ratio, 0.0, 10.0)  # Prevent extreme ratios
-        
+        ratio = torch.clamp(ratio, 0.0, 10.0) 
         surr1 = ratio * advantages
         surr2 = torch.clamp(ratio, 1-self.clip_epsilon, 1+self.clip_epsilon) * advantages
         policy_loss = -torch.min(surr1, surr2).mean()
-        
-        # Entropy loss with adaptive coefficient
         entropy = dist.entropy().mean()
         entropy_loss = -self.ent_coef * entropy
-        
-        # Total loss with gradient clipping
         total_loss = policy_loss + value_loss + entropy_loss
         
-        # Optimize
+        # optimize
         self.actor_optimizer.zero_grad()
         self.critic_optimizer.zero_grad()
         total_loss.backward()
         
-        # Clip gradients
+        # clip gradients
         torch.nn.utils.clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
         torch.nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
         
         self.actor_optimizer.step()
         self.critic_optimizer.step()
         
-        # Calculate KL divergence for early stopping
+        # calculate KL divergence for early stopping
         approx_kl = ((ratio - 1) - torch.log(ratio)).mean().item()
         if approx_kl > 0.015:
             return True

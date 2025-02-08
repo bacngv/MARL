@@ -20,8 +20,6 @@ def spawn_ai(algo_name, env, handle, human_name, max_steps, cuda=True):
         model = AC(env, human_name, handle, use_cuda=cuda)
     elif algo_name == 'mfac':
         model = MFAC(env, human_name, handle, use_cuda=cuda)
-    elif algo_name == 'qmix':
-        model = QMIX(env, human_name, handle, use_cuda=cuda)
     elif algo_name == 'mappo':
         model = MAPPO(env, human_name, handle, use_cuda=cuda)
     if cuda:
