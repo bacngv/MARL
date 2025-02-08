@@ -5,6 +5,7 @@ import os
 import numpy as np
 from moviepy.editor import ImageSequenceClip
 import threading
+import pandas as pd
 
 
 class Color:
@@ -307,7 +308,6 @@ class MemoryGroup(object):
 
 import os
 from moviepy.editor import ImageSequenceClip
-
 class Runner(object):
     def __init__(self, env, handles, max_steps, models,
                 play_handle, render_every=None, save_every=None, tau=0.001, 
@@ -325,9 +325,43 @@ class Runner(object):
         self.train = train
         self.tau = tau
         self.cuda = cuda
+        self.log_dir = log_dir
         
-        os.makedirs(self.render_dir, exist_ok=True)
+        # Create all necessary directories
+        self._create_directories()
         
+    def _create_directories(self):
+        """Create all necessary directories for logs, models, and renders."""
+        directories = [self.log_dir, self.model_dir, self.render_dir]
+        for directory in directories:
+            if directory is not None:
+                os.makedirs(directory, exist_ok=True)
+                print(f"[INFO] Created directory: {directory}")
+
+    def save_to_csv(self, round_losses, round_rewards, iteration):
+        """Save round losses and rewards to a CSV file."""
+        if self.log_dir is None:
+            print("[WARNING] Log directory not specified, skipping CSV save")
+            return
+        data = {
+            'Round': iteration,
+            'Loss': round_losses[0][-1] if round_losses[0] else None,
+            'Main Reward': round_rewards[0][-1] if round_rewards[0] else None,
+            'Opponent Reward': round_rewards[1][-1] if round_rewards[1] else None,
+        }
+        
+        df = pd.DataFrame([data])
+        csv_path = os.path.join(self.log_dir, 'training_metrics.csv')
+        
+        try:
+            if os.path.exists(csv_path):
+                df.to_csv(csv_path, mode='a', header=False, index=False)
+            else:
+                df.to_csv(csv_path, mode='w', header=True, index=False)
+            print(f"[INFO] Successfully saved metrics to {csv_path}")
+        except Exception as e:
+            print(f"[ERROR] Failed to save metrics to CSV: {str(e)}")
+    
     def is_self_play(self):
         """Check if we're in self-play mode"""
         return hasattr(self.models[1], 'save')
@@ -346,7 +380,7 @@ class Runner(object):
         info['main'] = {'ave_agent_reward': 0., 'total_reward': 0., 'kill': 0.}
         info['opponent'] = {'ave_agent_reward': 0., 'total_reward': 0., 'kill': 0.}
         
-        max_nums, nums, agent_r_records, total_rewards, render_list = self.play(
+        max_nums, nums, agent_r_records, total_rewards, render_list, round_losses, round_rewards = self.play(
             env=self.env, 
             n_round=iteration, 
             handles=self.handles,
@@ -389,10 +423,13 @@ class Runner(object):
                 else:
                     win_cnt['main'] += 1
                     win_cnt['opponent'] += 1
-                
+        
         if len(render_list) > 0:
             print('[*] Saving Render')
             clip = ImageSequenceClip(render_list, fps=35)
             clip.write_gif('{}/replay_{}.gif'.format(self.render_dir, iteration+1), fps=20, verbose=False)
             print('[*] Saved Render')
+        
+        # save
+        self.save_to_csv(round_losses, round_rewards, iteration)
             

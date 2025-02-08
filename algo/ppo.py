@@ -142,53 +142,6 @@ class Critic(nn.Module):
     def forward(self, cent_obs, rnn_states, masks):
         values = self.net(cent_obs)
         return values, rnn_states
-    
-class TrainingLogger:
-    def __init__(self):
-        self.rewards = []
-        self.losses = []
-        self.actor_losses = []
-        self.critic_losses = []
-        self.entropy_losses = []
-        self.kl_divergences = []
-
-    def log_reward(self, reward):
-        self.rewards.append(reward)
-
-    def log_loss(self, loss):
-        self.losses.append(loss)
-
-    def log_actor_loss(self, actor_loss):
-        self.actor_losses.append(actor_loss)
-
-    def log_critic_loss(self, critic_loss):
-        self.critic_losses.append(critic_loss)
-
-    def log_entropy_loss(self, entropy_loss):
-        self.entropy_losses.append(entropy_loss)
-
-    def log_kl_divergence(self, kl_divergence):
-        self.kl_divergences.append(kl_divergence)
-
-    def save_logs(self, file_path):
-        logs = {
-            'rewards': self.rewards,
-            'losses': self.losses,
-            'actor_losses': self.actor_losses,
-            'critic_losses': self.critic_losses,
-            'entropy_losses': self.entropy_losses,
-            'kl_divergences': self.kl_divergences
-        }
-        torch.save(logs, file_path)
-
-    def load_logs(self, file_path):
-        logs = torch.load(file_path)
-        self.rewards = logs['rewards']
-        self.losses = logs['losses']
-        self.actor_losses = logs['actor_losses']
-        self.critic_losses = logs['critic_losses']
-        self.entropy_losses = logs['entropy_losses']
-        self.kl_divergences = logs['kl_divergences']
 
 class PPOPolicy(nn.Module):
     def __init__(self, env, name, handle, value_coef=0.5, ent_coef=0.01, gamma=0.99, 
@@ -233,6 +186,12 @@ class PPOPolicy(nn.Module):
         self.critic = Critic(np.prod(self.view_space) + self.feature_space, device='cuda' if use_cuda else 'cpu')
         self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=learning_rate)
         self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=learning_rate)
+
+        self.current_policy_loss = 0
+        self.current_value_loss = 0
+        self.current_entropy_loss = 0
+        self.current_total_loss = 0
+        self.loss_history = []
 
     def act(self, **kwargs):
         device = next(self.actor.parameters()).device
@@ -295,17 +254,9 @@ class PPOPolicy(nn.Module):
             advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
             advantages = torch.FloatTensor(advantages).to(device)
 
-        # Initialize logger
-        logger = TrainingLogger()
-
-        for epoch in range(self.ppo_epochs):
+        for _ in range(self.ppo_epochs):
             for batch in loader:
-                stop_early = self._update_network(batch, advantages, logger)
-                if stop_early:
-                    break
-
-        # Save logs after training
-        logger.save_logs('training_logs.pth')
+                self._update_network(batch, advantages)
 
     def _resize_buffers(self, n):
         buffers = [self.view_buf, self.feature_buf, self.action_buf, 
@@ -398,13 +349,15 @@ class PPOPolicy(nn.Module):
             torch.FloatTensor(log_probs).to(device)
         )
 
-    def _update_network(self, batch, advantages, logger):
+    def _update_network(self, batch, advantages):
         batch_view, batch_feat, batch_act, batch_ret, batch_old_logp = batch
         batch_size = batch_view.shape[0]
         advantages = advantages[:batch_size]
         
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
         combined_input = torch.cat([batch_view.flatten(1), batch_feat], dim=-1)
+        
+        # Calculate value loss
         values, _ = self.critic(combined_input, None, None)
         values = values.squeeze(-1)
         value_pred_clipped = batch_old_logp + torch.clamp(
@@ -415,43 +368,78 @@ class PPOPolicy(nn.Module):
         value_losses = (values - batch_ret).pow(2)
         value_losses_clipped = (value_pred_clipped - batch_ret).pow(2)
         value_loss = self.value_coef * torch.max(value_losses, value_losses_clipped).mean()
+        
+        # Calculate policy loss
         dist = torch.distributions.Categorical(F.softmax(self.actor.net(combined_input), dim=-1))
         new_logp = dist.log_prob(batch_act)
         ratio = torch.exp(new_logp - batch_old_logp)
-        ratio = torch.clamp(ratio, 0.0, 10.0) 
+        ratio = torch.clamp(ratio, 0.0, 10.0)
         surr1 = ratio * advantages
         surr2 = torch.clamp(ratio, 1-self.clip_epsilon, 1+self.clip_epsilon) * advantages
         policy_loss = -torch.min(surr1, surr2).mean()
+        
+        # Calculate entropy loss
         entropy = dist.entropy().mean()
         entropy_loss = -self.ent_coef * entropy
+        
+        # Calculate total loss
         total_loss = policy_loss + value_loss + entropy_loss
         
-        # Log losses
-        logger.log_loss(total_loss.item())
-        logger.log_actor_loss(policy_loss.item())
-        logger.log_critic_loss(value_loss.item())
-        logger.log_entropy_loss(entropy_loss.item())
+        # Store current losses
+        self.current_policy_loss = policy_loss.item()
+        self.current_value_loss = value_loss.item()
+        self.current_entropy_loss = entropy_loss.item()
+        self.current_total_loss = total_loss.item()
         
-        # optimize
+        # Optimize
         self.actor_optimizer.zero_grad()
         self.critic_optimizer.zero_grad()
         total_loss.backward()
         
-        # clip gradients
+        # Clip gradients
         torch.nn.utils.clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
         torch.nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
         
         self.actor_optimizer.step()
         self.critic_optimizer.step()
         
-        # calculate KL divergence for early stopping
-        approx_kl = ((ratio - 1) - torch.log(ratio)).mean().item()
-        logger.log_kl_divergence(approx_kl)
+        # Store losses in history
+        self.loss_history.append({
+            'policy_loss': self.current_policy_loss,
+            'value_loss': self.current_value_loss,
+            'entropy_loss': self.current_entropy_loss,
+            'total_loss': self.current_total_loss
+        })
         
+        # Calculate KL divergence for early stopping
+        approx_kl = ((ratio - 1) - torch.log(ratio)).mean().item()
         if approx_kl > 0.015:
             return True
             
         return False
+
+    def get_loss(self):
+        """
+        Get the most recent loss values.
+        
+        Returns:
+            dict: Dictionary containing the current loss values for policy, value, entropy, and total loss
+        """
+        return {
+            'policy_loss': self.current_policy_loss,
+            'value_loss': self.current_value_loss,
+            'entropy_loss': self.current_entropy_loss,
+            'total_loss': self.current_total_loss
+        }
+
+    def get_loss_history(self):
+        """
+        Get the complete history of losses.
+        
+        Returns:
+            list: List of dictionaries containing loss values for each update
+        """
+        return self.loss_history
 
     def flush_buffer(self, **kwargs):
         self.replay_buffer.push(**kwargs)
