@@ -43,7 +43,12 @@ def play(env, n_round, handles, models, print_every, eps=1.0, render=False, trai
     mean_rewards = [[] for _ in range(n_group)]
     total_rewards = [[] for _ in range(n_group)]
 
-    former_act_prob = [np.zeros((1, env.unwrapped.env.get_action_space(handles[0])[0])), np.zeros((1, env.unwrapped.env.get_action_space(handles[1])[0]))]
+    former_act_prob = [np.zeros((1, env.unwrapped.env.get_action_space(handles[0])[0])), 
+                      np.zeros((1, env.unwrapped.env.get_action_space(handles[1])[0]))]
+
+    # Reset RNN states at the beginning of each episode
+    for model in models:
+        model.reset_rnn_states()
 
     while not done and step_ct < max_steps:
         # take actions for every model
@@ -53,11 +58,23 @@ def play(env, n_round, handles, models, print_every, eps=1.0, render=False, trai
 
         for i in range(n_group):
             former_act_prob[i] = np.tile(former_act_prob[i], (len(state[i][0]), 1))
+            # Add agent_idx to the act() call
             if cuda:
-                acts[i] = models[i].act(obs=torch.FloatTensor(state[i][0]).permute([0, 3, 1, 2]).cuda(), feature=torch.FloatTensor(state[i][1]).cuda(), prob=torch.FloatTensor(former_act_prob[i]).cuda(), eps=eps)
+                acts[i] = models[i].act(
+                    agent_idx=i,
+                    obs=torch.FloatTensor(state[i][0]).permute([0, 3, 1, 2]).cuda(),
+                    feature=torch.FloatTensor(state[i][1]).cuda(),
+                    prob=torch.FloatTensor(former_act_prob[i]).cuda(),
+                    eps=eps
+                )
             else:
-                acts[i] = models[i].act(obs=torch.FloatTensor(state[i][0]).permute([0, 3, 1, 2]), feature=torch.FloatTensor(state[i][1]), prob=torch.FloatTensor(former_act_prob[i]), eps=eps)
-                
+                acts[i] = models[i].act(
+                    agent_idx=i,
+                    obs=torch.FloatTensor(state[i][0]).permute([0, 3, 1, 2]),
+                    feature=torch.FloatTensor(state[i][1]),
+                    prob=torch.FloatTensor(former_act_prob[i]),
+                    eps=eps
+                )
                 
         for i in range(n_group):
             env.unwrapped.env.set_action(handles[i], acts[i].astype(np.int32))
@@ -69,18 +86,21 @@ def play(env, n_round, handles, models, print_every, eps=1.0, render=False, trai
             rewards[i] = env.unwrapped.env.get_reward(handles[i])
             alives[i] = env.unwrapped.env.get_alive(handles[i])
 
-        buffer = {
-            'state': state[0], 'acts': acts[0], 'rewards': rewards[0],
-            'alives': alives[0], 'ids': ids[0]
-        }
-
-        buffer['prob'] = former_act_prob[0]
+        # Store experience for each agent
+        for i in range(n_group):
+            buffer = {
+                'state': state[i],
+                'acts': acts[i],
+                'rewards': rewards[i],
+                'alives': alives[i],
+                'ids': ids[i],
+                'prob': former_act_prob[i]
+            }
+            if train:
+                models[i].flush_buffer(agent_idx=i, **buffer)
 
         for i in range(n_group):
             former_act_prob[i] = np.mean(list(map(lambda x: np.eye(n_action[i])[x], acts[i])), axis=0, keepdims=True)
-
-        if train:
-            models[0].flush_buffer(**buffer)
 
         # stat info
         nums = [env.unwrapped.env.get_num(handle) for handle in handles]
@@ -104,18 +124,30 @@ def play(env, n_round, handles, models, print_every, eps=1.0, render=False, trai
         if step_ct % print_every == 0:
             print("> step #{}, info: {}".format(step_ct, info))
 
+    # Train all agents
     if train:
-        models[0].train(cuda)
+        for i in range(n_group):
+            models[i].train(cuda)
 
     for i in range(n_group):
         mean_rewards[i] = sum(mean_rewards[i]) / len(mean_rewards[i])
         total_rewards[i] = sum(total_rewards[i])
 
-    # Lưu loss và rewards vào file CSV
+    # Save training metrics for all agents
     if train:
-        loss_info = models[0].get_loss()
-        csv_data = [n_round, mean_rewards[0], total_rewards[0], loss_info['policy_loss'], loss_info['value_loss'], loss_info['entropy_loss'], loss_info['total_loss']]
-        save_to_csv('training_log.csv', csv_data)
+        for i in range(n_group):
+            loss_info = models[i].get_loss()
+            csv_data = [
+                n_round,
+                i,  # agent index
+                mean_rewards[i],
+                total_rewards[i],
+                loss_info['policy_loss'],
+                loss_info['value_loss'],
+                loss_info['entropy_loss'],
+                loss_info['total_loss']
+            ]
+            save_to_csv(f'training_log_agent_{i}.csv', csv_data)
 
     return max_nums, nums, mean_rewards, total_rewards, obs_list
 

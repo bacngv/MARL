@@ -190,26 +190,42 @@ class MAPPOPolicy(nn.Module):
         self.max_grad_norm = max_grad_norm
         self.gae_lambda = gae_lambda
         self.reward_scaling = reward_scaling
-        self.view_buf = np.empty([1,] + list(self.view_space))
-        self.feature_buf = np.empty([1,] + [self.feature_space])
-        self.action_buf = np.empty(1, dtype=np.int32)
-        self.reward_buf = np.empty(1, dtype=np.float32)
-        self.log_probs_buf = np.empty(1, dtype=np.float32)
-        self.replay_buffer = EpisodesBuffer()
+        
+        # Initialize separate buffers for each agent
+        self.view_bufs = [np.empty([1,] + list(self.view_space)) for _ in range(num_agents)]
+        self.feature_bufs = [np.empty([1,] + [self.feature_space]) for _ in range(num_agents)]
+        self.action_bufs = [np.empty(1, dtype=np.int32) for _ in range(num_agents)]
+        self.reward_bufs = [np.empty(1, dtype=np.float32) for _ in range(num_agents)]
+        self.log_probs_bufs = [np.empty(1, dtype=np.float32) for _ in range(num_agents)]
+        
+        # Initialize separate replay buffers for each agent
+        self.replay_buffers = [EpisodesBuffer() for _ in range(num_agents)]
+        
         obs_dim = np.prod(self.view_space) + self.feature_space
-        self.actor = Actor_RNN(obs_dim, self.num_actions, device='cuda' if use_cuda else 'cpu')
+        # Create separate actors for each agent but share the critic
+        self.actors = nn.ModuleList([
+            Actor_RNN(obs_dim, self.num_actions, device='cuda' if use_cuda else 'cpu')
+            for _ in range(num_agents)
+        ])
         self.critic = CentralizedCritic_RNN(obs_dim, num_agents, device='cuda' if use_cuda else 'cpu')
-        self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=learning_rate)
+        
+        # Separate optimizers for each actor
+        self.actor_optimizers = [
+            torch.optim.Adam(actor.parameters(), lr=learning_rate)
+            for actor in self.actors
+        ]
         self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=learning_rate)
-        self.actor_rnn_states = None
+        
+        # RNN states for each agent
+        self.actor_rnn_states = [None for _ in range(num_agents)]
         self.critic_rnn_states = None
-        self.current_policy_loss = 0
+        
+        # Loss tracking for each agent
+        self.current_policy_losses = [0 for _ in range(num_agents)]
         self.current_value_loss = 0
-        self.current_entropy_loss = 0
-        self.current_total_loss = 0
+        self.current_entropy_losses = [0 for _ in range(num_agents)]
+        self.current_total_losses = [0 for _ in range(num_agents)]
         self.loss_history = []
-
-        self.replay_buffer = EpisodesBuffer()
     def _convert_to_tensors(self, view, feature, action, reward, log_probs):
         device = torch.device('cuda' if self.use_cuda else 'cpu')
         view_tensor = torch.FloatTensor(view).to(device)
@@ -219,27 +235,30 @@ class MAPPOPolicy(nn.Module):
         log_probs_tensor = torch.FloatTensor(log_probs).to(device)
         
         return view_tensor, feature_tensor, action_tensor, reward_tensor, log_probs_tensor
-    def flush_buffer(self, **kwargs):
-        self.replay_buffer.push(**kwargs)
+    def flush_buffer(self, agent_idx, **kwargs):
+        self.replay_buffers[agent_idx].push(**kwargs)
 
-    def act(self, **kwargs):
-        device = next(self.actor.parameters()).device
+    def act(self, agent_idx, **kwargs):
+        device = next(self.actors[agent_idx].parameters()).device
         if isinstance(kwargs['obs'], torch.Tensor):
             obs = kwargs['obs'].to(device)
-            if len(obs.shape) == 4: 
+            if len(obs.shape) == 4:
                 obs = obs.flatten(1)
         else:
             obs = torch.FloatTensor(kwargs['obs']).to(device).flatten(1)
+            
         if isinstance(kwargs['feature'], torch.Tensor):
             feature = kwargs['feature'].to(device)
         else:
             feature = torch.FloatTensor(kwargs['feature']).to(device)
+            
         combined_input = torch.cat([obs, feature], dim=-1)
         batch_size = combined_input.size(0)
         masks = kwargs.get('masks', torch.ones(batch_size, 1).to(device))
-        actions, action_log_probs, self.actor_rnn_states = self.actor(
-            combined_input, 
-            self.actor_rnn_states,
+        
+        actions, action_log_probs, self.actor_rnn_states[agent_idx] = self.actors[agent_idx](
+            combined_input,
+            self.actor_rnn_states[agent_idx],
             masks,
             kwargs.get('available_actions', None),
             kwargs.get('deterministic', False)
@@ -257,8 +276,10 @@ class MAPPOPolicy(nn.Module):
         if len(obs_batch.shape) == 4: 
             obs_batch = obs_batch.unsqueeze(1)
             feature_batch = feature_batch.unsqueeze(1)
+        # Khởi tạo tensor zeros để chứa observations của tất cả agents
         cent_obs = torch.zeros(batch_size, self.num_agents * obs_dim).to(obs_batch.device)
         
+        # Chỉ điền data cho các agent còn sống
         for i in range(min(self.num_agents, obs_batch.shape[1])):
             start_idx = i * obs_dim
             end_idx = start_idx + obs_dim
@@ -267,93 +288,122 @@ class MAPPOPolicy(nn.Module):
                 feature_batch[:, i]
             ], dim=-1)
             cent_obs[:, start_idx:end_idx] = agent_obs
-        if obs_batch.shape[1] < self.num_agents:
-            last_agent_obs = cent_obs[:, (obs_batch.shape[1]-1)*obs_dim:obs_batch.shape[1]*obs_dim]
-            for i in range(obs_batch.shape[1], self.num_agents):
-                start_idx = i * obs_dim
-                end_idx = start_idx + obs_dim
-                cent_obs[:, start_idx:end_idx] = last_agent_obs
-                
+        
+        # Các agent đã chết sẽ giữ nguyên giá trị 0 trong cent_obs
         return cent_obs
 
     def train(self, cuda):
-        batch_data = list(self.replay_buffer.episodes())
-        if not batch_data:
-            print("Warning: No episodes in replay buffer")
-            return
+        total_policy_loss = 0
+        total_value_loss = 0
+        total_entropy_loss = 0
+        
+        # Process each agent's data
+        for agent_idx in range(self.num_agents):
+            batch_data = list(self.replay_buffers[agent_idx].episodes())
+            if not batch_data:
+                continue
+                
+            self.replay_buffers[agent_idx].reset()
+            n = sum(len(ep.rewards) for ep in batch_data)
+            if n == 0:
+                continue
+                
+            self._resize_buffers(n, agent_idx)
+            buffer_data = self._fill_buffers(batch_data, agent_idx)
+            if buffer_data is None:
+                continue
+                
+            view, feature, action, reward, log_probs = buffer_data
+            device = torch.device('cuda' if cuda else 'cpu')
+            tensor_data = self._convert_to_tensors(view, feature, action, reward, log_probs)
+            dataset = TensorDataset(*tensor_data)
+            loader = DataLoader(dataset, batch_size=self.minibatch_size, shuffle=True)
             
-        self.replay_buffer.reset()
-        n = sum(len(ep.rewards) for ep in batch_data)
-        if n == 0: 
-            print("Warning: No samples in episodes")
-            return
-            
-        self._resize_buffers(n)
-        buffer_data = self._fill_buffers(batch_data)
-        if buffer_data is None: 
-            print("Warning: Failed to fill buffers")
-            return
-            
-        view, feature, action, reward, log_probs = buffer_data
-        device = torch.device('cuda' if cuda else 'cpu')
-        tensor_data = self._convert_to_tensors(view, feature, action, reward, log_probs)
-        dataset = TensorDataset(*tensor_data)
-        loader = DataLoader(dataset, batch_size=self.minibatch_size, shuffle=True)
-        with torch.no_grad():
-            cent_obs = self._collect_centralized_obs(tensor_data[0], tensor_data[1])
-            old_values = self.critic(cent_obs, None, None)[0].flatten()
-            advantages = (tensor_data[3] - old_values).cpu().numpy()
-            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-            advantages = torch.FloatTensor(advantages).to(device)
-        for _ in range(self.ppo_epochs):
-            for batch in loader:
-                self._update_network(batch, advantages)
+            with torch.no_grad():
+                cent_obs = self._collect_centralized_obs(tensor_data[0], tensor_data[1])
+                old_values = self.critic(cent_obs, None, None)[0].flatten()
+                advantages = (tensor_data[3] - old_values).cpu().numpy()
+                advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+                advantages = torch.FloatTensor(advantages).to(device)
+                
+            for _ in range(self.ppo_epochs):
+                for batch in loader:
+                    losses = self._update_network(batch, advantages, agent_idx)
+                    total_policy_loss += losses['policy_loss']
+                    total_value_loss += losses['value_loss']
+                    total_entropy_loss += losses['entropy_loss']
+        
+        # Average losses across agents
+        num_updates = self.num_agents * self.ppo_epochs
+        if num_updates > 0:
+            self.current_policy_loss = total_policy_loss / num_updates
+            self.current_value_loss = total_value_loss / num_updates
+            self.current_entropy_loss = total_entropy_loss / num_updates
+            self.current_total_loss = (self.current_policy_loss + 
+                                     self.current_value_loss + 
+                                     self.current_entropy_loss)
 
-    def _update_network(self, batch, advantages):
+    def _update_network(self, batch, advantages, agent_idx):
         batch_view, batch_feat, batch_act, batch_ret, batch_old_logp = batch
         batch_size = batch_view.shape[0]
         advantages = advantages[:batch_size]
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        
         # Get centralized observations for critic
         cent_obs = self._collect_centralized_obs(batch_view, batch_feat)
         combined_input = torch.cat([batch_view.flatten(1), batch_feat], dim=-1)
+        
         # Calculate value loss with centralized critic
         values, _ = self.critic(cent_obs, None, None)
         values = values.squeeze(-1)
         value_loss = self.value_coef * F.mse_loss(values, batch_ret)
-        # Calculate policy loss using the new get_action_logits method
-        action_logits = self.actor.get_action_logits(combined_input)
+        
+        # Calculate policy loss for specific agent
+        action_logits = self.actors[agent_idx].get_action_logits(combined_input)
         action_probs = F.softmax(action_logits, dim=-1)
         dist = torch.distributions.Categorical(action_probs)
         new_logp = dist.log_prob(batch_act)
         ratio = torch.exp(new_logp - batch_old_logp)
         ratio = torch.clamp(ratio, 0.0, 10.0)
+        
         # PPO policy loss
         surr1 = ratio * advantages
         surr2 = torch.clamp(ratio, 1-self.clip_epsilon, 1+self.clip_epsilon) * advantages
         policy_loss = -torch.min(surr1, surr2).mean()
+        
         # Calculate entropy loss
         entropy = dist.entropy().mean()
         entropy_loss = -self.ent_coef * entropy
+        
         # Calculate total loss
         total_loss = policy_loss + value_loss + entropy_loss
+        
         # Optimize
-        self.actor_optimizer.zero_grad()
+        self.actor_optimizers[agent_idx].zero_grad()
         self.critic_optimizer.zero_grad()
         total_loss.backward()
+        
         # Clip gradients
-        torch.nn.utils.clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
+        torch.nn.utils.clip_grad_norm_(self.actors[agent_idx].parameters(), self.max_grad_norm)
         torch.nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
-        self.actor_optimizer.step()
+        
+        self.actor_optimizers[agent_idx].step()
         self.critic_optimizer.step()
-        # Store current losses
-        self.current_policy_loss = policy_loss.item()
-        self.current_value_loss = value_loss.item()
-        self.current_entropy_loss = entropy_loss.item()
-        self.current_total_loss = total_loss.item()
-    def _resize_buffers(self, n):
-        buffers = [self.view_buf, self.feature_buf, self.action_buf, 
-                   self.reward_buf, self.log_probs_buf]
+        
+        return {
+            'policy_loss': policy_loss.item(),
+            'value_loss': value_loss.item(),
+            'entropy_loss': entropy_loss.item(),
+            'total_loss': total_loss.item()
+        }
+    def _resize_buffers(self, n, agent_idx):
+        buffers = [
+            self.view_bufs[agent_idx], 
+            self.feature_bufs[agent_idx],
+            self.action_bufs[agent_idx],
+            self.reward_bufs[agent_idx],
+            self.log_probs_bufs[agent_idx]
+        ]
         shapes = [list(self.view_space), [self.feature_space], 1, 1, 1]
         
         for buf, shape in zip(buffers, shapes):
@@ -361,37 +411,42 @@ class MAPPOPolicy(nn.Module):
                 buf.resize(n, refcheck=False)
             else:
                 buf.resize([n] + shape, refcheck=False)
-    def _fill_buffers(self, batch_data):
+    def _fill_buffers(self, batch_data, agent_idx):
+        """Fill the buffers with episode data for a specific agent"""
         ct = 0
         
         for episode in batch_data:
             m = len(episode.rewards)
             returns, advantages = self._calculate_returns(episode)
-            self.view_buf[ct:ct+m] = episode.views
-            self.feature_buf[ct:ct+m] = episode.features
-            self.action_buf[ct:ct+m] = episode.actions
-            self.reward_buf[ct:ct+m] = returns
+            
+            self.view_bufs[agent_idx][ct:ct+m] = episode.views
+            self.feature_bufs[agent_idx][ct:ct+m] = episode.features
+            self.action_bufs[agent_idx][ct:ct+m] = episode.actions
+            self.reward_bufs[agent_idx][ct:ct+m] = returns
+            
             if hasattr(episode, 'probs') and len(episode.probs) > 0:
-                self.log_probs_buf[ct:ct+m] = np.log(episode.probs)
+                self.log_probs_bufs[agent_idx][ct:ct+m] = np.log(episode.probs)
             else:
                 views = torch.FloatTensor(episode.views)
                 features = torch.FloatTensor(episode.features)
                 
                 with torch.no_grad():
                     _, recalc_log_probs = self.act(
+                        agent_idx=agent_idx,
                         obs=views,
                         feature=features,
                         return_log_prob=True
                     )
-                self.log_probs_buf[ct:ct+m] = recalc_log_probs
+                self.log_probs_bufs[agent_idx][ct:ct+m] = recalc_log_probs
                 
             ct += m
+            
         return (
-            self.view_buf[:ct], 
-            self.feature_buf[:ct],
-            self.action_buf[:ct],
-            self.reward_buf[:ct],
-            self.log_probs_buf[:ct]
+            self.view_bufs[agent_idx][:ct],
+            self.feature_bufs[agent_idx][:ct],
+            self.action_bufs[agent_idx][:ct],
+            self.reward_bufs[agent_idx][:ct],
+            self.log_probs_bufs[agent_idx][:ct]
         )
     def _calculate_returns(self, episode):
         """Calculate returns using GAE with modified reward scaling"""
@@ -403,14 +458,35 @@ class MAPPOPolicy(nn.Module):
             np.array(episode.rewards, dtype=np.float32) * self.reward_scaling,
             -10000.0, 10000.0  
         )
+        
         with torch.no_grad():
             values = []
-            for i in range(len(episode.views)):
-                v = self._calc_value(episode.views[i], episode.features[i])[0]
-                values.append(v)
-            values = np.array(values, dtype=np.float32).flatten()
+            combined_obs = []
             
-        # cal gae with normalization
+            for i in range(len(episode.views)):
+                view = torch.FloatTensor(episode.views[i])
+                feature = torch.FloatTensor(episode.features[i])
+                
+                if len(view.shape) == 3:
+                    view = view.unsqueeze(0)
+                if len(feature.shape) == 1:
+                    feature = feature.unsqueeze(0)
+                    
+                if self.use_cuda:
+                    view = view.cuda()
+                    feature = feature.cuda()
+                    
+                combined_input = torch.cat([view.flatten(1), feature], dim=-1)
+                combined_obs.append(combined_input)
+                
+            combined_obs = torch.cat(combined_obs, dim=0)
+            combined_obs = combined_obs.repeat(1, self.num_agents)
+            masks = torch.ones(combined_obs.size(0), 1).to(combined_obs.device)
+            
+            values, _ = self.critic(combined_obs, None, masks)
+            values = values.cpu().numpy().flatten()
+                
+        # calculate GAE with normalization
         gae = 0
         for t in reversed(range(len(scaled_rewards))):
             if t == len(scaled_rewards) - 1:
@@ -447,8 +523,8 @@ class MAPPOPolicy(nn.Module):
         return values.detach().cpu().numpy()
 
     def reset_rnn_states(self):
-        """Reset RNN states at the beginning of new episodes"""
-        self.actor_rnn_states = None
+        """Reset RNN states for all agents at the beginning of new episodes"""
+        self.actor_rnn_states = [None for _ in range(self.num_agents)]
         self.critic_rnn_states = None
     def get_loss(self):
         return {
@@ -463,7 +539,7 @@ class MAPPOPolicy(nn.Module):
 
     def get_all_params(self):
         all_params = []
-        for param in self.actor.parameters():
+        for param in self.actors.parameters():
             if param.requires_grad:
                 all_params.append(param)
         for param in self.critic.parameters():
@@ -509,17 +585,25 @@ class MAPPOPolicy(nn.Module):
     def save(self, dir_path, step=0):
         os.makedirs(dir_path, exist_ok=True)
         path = os.path.join(dir_path, f"mappo_{step}")
-        torch.save({
-            'actor_state_dict': self.actor.state_dict(),
+        save_dict = {
             'critic_state_dict': self.critic.state_dict(),
-            'actor_optimizer_state_dict': self.actor_optimizer.state_dict(),
             'critic_optimizer_state_dict': self.critic_optimizer.state_dict(),
-        }, path)
+        }
+        # Save state dicts for all actors and their optimizers
+        for i, (actor, optimizer) in enumerate(zip(self.actors, self.actor_optimizers)):
+            save_dict[f'actor_{i}_state_dict'] = actor.state_dict()
+            save_dict[f'actor_optimizer_{i}_state_dict'] = optimizer.state_dict()
+        
+        torch.save(save_dict, path)
 
     def load(self, dir_path, step=0):
         path = os.path.join(dir_path, f"mappo_{step}")
         checkpoint = torch.load(path)
-        self.actor.load_state_dict(checkpoint['actor_state_dict'])
+        
         self.critic.load_state_dict(checkpoint['critic_state_dict'])
-        self.actor_optimizer.load_state_dict(checkpoint['actor_optimizer_state_dict'])
         self.critic_optimizer.load_state_dict(checkpoint['critic_optimizer_state_dict'])
+        
+        # Load state dicts for all actors and their optimizers
+        for i, (actor, optimizer) in enumerate(zip(self.actors, self.actor_optimizers)):
+            actor.load_state_dict(checkpoint[f'actor_{i}_state_dict'])
+            optimizer.load_state_dict(checkpoint[f'actor_optimizer_{i}_state_dict'])
