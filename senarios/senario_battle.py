@@ -5,7 +5,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+import csv
 
+def save_to_csv(filename, data):
+    """Save data to a CSV file."""
+    with open(filename, mode='a', newline='') as file:
+        writer = csv.writer(file)
+        writer.writerow(data)
+        
 def play(env, n_round, handles, models, print_every, eps=1.0, render=False, train=False, cuda=True):
     """play a ground and train"""
     env.reset()
@@ -37,10 +44,9 @@ def play(env, n_round, handles, models, print_every, eps=1.0, render=False, trai
     total_rewards = [[] for _ in range(n_group)]
 
     former_act_prob = [np.zeros((1, env.unwrapped.env.get_action_space(handles[0])[0])), np.zeros((1, env.unwrapped.env.get_action_space(handles[1])[0]))]
-    round_losses = [[] for _ in range(n_group)]
-    round_rewards = [[] for _ in range(n_group)]
 
     while not done and step_ct < max_steps:
+        # take actions for every model
         for i in range(n_group):
             state[i] = list(env.unwrapped.env.get_observation(handles[i]))
             ids[i] = env.unwrapped.env.get_agent_id(handles[i])
@@ -51,6 +57,7 @@ def play(env, n_round, handles, models, print_every, eps=1.0, render=False, trai
                 acts[i] = models[i].act(obs=torch.FloatTensor(state[i][0]).permute([0, 3, 1, 2]).cuda(), feature=torch.FloatTensor(state[i][1]).cuda(), prob=torch.FloatTensor(former_act_prob[i]).cuda(), eps=eps)
             else:
                 acts[i] = models[i].act(obs=torch.FloatTensor(state[i][0]).permute([0, 3, 1, 2]), feature=torch.FloatTensor(state[i][1]), prob=torch.FloatTensor(former_act_prob[i]), eps=eps)
+                
                 
         for i in range(n_group):
             env.unwrapped.env.set_action(handles[i], acts[i].astype(np.int32))
@@ -104,13 +111,13 @@ def play(env, n_round, handles, models, print_every, eps=1.0, render=False, trai
         mean_rewards[i] = sum(mean_rewards[i]) / len(mean_rewards[i])
         total_rewards[i] = sum(total_rewards[i])
 
-    # save
-    for i in range(n_group):
-        round_losses[i].append(models[i].get_loss())
-        round_rewards[i].append(total_rewards[i])
+    # Lưu loss và rewards vào file CSV
+    if train:
+        loss_info = models[0].get_loss()
+        csv_data = [n_round, mean_rewards[0], total_rewards[0], loss_info['policy_loss'], loss_info['value_loss'], loss_info['entropy_loss'], loss_info['total_loss']]
+        save_to_csv('training_log.csv', csv_data)
 
-    return max_nums, nums, mean_rewards, total_rewards, obs_list, round_losses, round_rewards
-
+    return max_nums, nums, mean_rewards, total_rewards, obs_list
 
 def battle(env, n_round, handles, models, print_every, eps=1.0, render=False, train=False, cuda=True):
     """play a ground and train"""

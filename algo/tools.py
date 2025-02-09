@@ -380,7 +380,7 @@ class Runner(object):
         info['main'] = {'ave_agent_reward': 0., 'total_reward': 0., 'kill': 0.}
         info['opponent'] = {'ave_agent_reward': 0., 'total_reward': 0., 'kill': 0.}
         
-        max_nums, nums, agent_r_records, total_rewards, render_list, round_losses, round_rewards = self.play(
+        max_nums, nums, mean_rewards, total_rewards, render_list = self.play(
             env=self.env, 
             n_round=iteration, 
             handles=self.handles,
@@ -395,7 +395,7 @@ class Runner(object):
         for i, tag in enumerate(['main', 'opponent']):
             info[tag]['total_reward'] = total_rewards[i]
             info[tag]['kill'] = max_nums[i] - nums[1 - i]
-            info[tag]['ave_agent_reward'] = agent_r_records[i]
+            info[tag]['ave_agent_reward'] = mean_rewards[i]
             
         if self.train:
             print('\n[INFO] Main: {} \nOpponent: {}'.format(info['main'], info['opponent']))
@@ -429,7 +429,5 @@ class Runner(object):
             clip = ImageSequenceClip(render_list, fps=35)
             clip.write_gif('{}/replay_{}.gif'.format(self.render_dir, iteration+1), fps=20, verbose=False)
             print('[*] Saved Render')
-        
-        # save
-        self.save_to_csv(round_losses, round_rewards, iteration)
+
             
