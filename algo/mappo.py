@@ -64,97 +64,111 @@ class EpisodesBuffer:
         """ get episodes """
         return self.buffer.values()
 
-class Actor(nn.Module):
+def orthogonal_init(layer, gain=1.0):
+    for name, param in layer.named_parameters():
+        if 'bias' in name:
+            nn.init.constant_(param, 0)
+        elif 'weight' in name:
+            nn.init.orthogonal_(param, gain=gain)
+
+class Actor_RNN(nn.Module):
     def __init__(self, obs_space, act_space, device):
-        super(Actor, self).__init__()
+        super(Actor_RNN, self).__init__()
         self.device = device
         self.obs_space = obs_space
         self.act_space = act_space
-        self.net = self._construct_net()
-        self._init_weights()
-
-    def _construct_net(self):
-        return nn.Sequential(
-            nn.Linear(self.obs_space, 256),
+        self.rnn_hidden_dim = 256
+        self.fc_in = nn.Sequential(
+            nn.Linear(obs_space, 256),
             nn.LayerNorm(256),
-            nn.ReLU(),  
-            nn.Linear(256, 256),
-            nn.LayerNorm(256),
-            nn.ReLU(),
-            nn.Linear(256, self.act_space)
+            nn.ReLU()
         )
-    
-    def _init_weights(self):
-        for layer in self.net:
-            if isinstance(layer, nn.Linear):
-                nn.init.orthogonal_(layer.weight, gain=np.sqrt(2))
-                nn.init.constant_(layer.bias, 0)
+        self.rnn = nn.GRUCell(256, self.rnn_hidden_dim)
+        self.fc_out = nn.Linear(self.rnn_hidden_dim, act_space)
+        orthogonal_init(self.fc_in[0])
+        orthogonal_init(self.rnn, gain=1.0)
+        orthogonal_init(self.fc_out, gain=0.01)
 
-    def forward(self, obs, rnn_states, masks, available_actions=None, deterministic=False):
-        action_logits = self.net(obs)
-        
+    def get_action_logits(self, obs):
+        """Direct computation of action logits without RNN for training"""
+        x = self.fc_in(obs)
+        rnn_states = torch.zeros(obs.size(0), self.rnn_hidden_dim).to(self.device)
+        rnn_out = self.rnn(x, rnn_states)
+        return self.fc_out(rnn_out)
+
+    def forward(self, obs, rnn_states, masks=None, available_actions=None, deterministic=False):
+        batch_size = obs.size(0)
+        x = self.fc_in(obs)
+        if rnn_states is None:
+            rnn_states = torch.zeros(batch_size, self.rnn_hidden_dim).to(self.device)
+        if rnn_states.size(0) != batch_size:
+            rnn_states = rnn_states[:batch_size]
+            if rnn_states.size(0) < batch_size:
+                padding = torch.zeros(batch_size - rnn_states.size(0), self.rnn_hidden_dim).to(self.device)
+                rnn_states = torch.cat([rnn_states, padding], dim=0)
+        if masks is not None:
+            if masks.dim() == 1:
+                masks = masks.unsqueeze(1)
+            if masks.size(0) != batch_size:
+                masks = masks[:batch_size]
+            rnn_states = rnn_states * masks
+        rnn_states = self.rnn(x, rnn_states)
+        action_logits = self.fc_out(rnn_states)
         if available_actions is not None:
             action_logits = action_logits.masked_fill(~available_actions, float('-inf'))
-        
         action_probs = F.softmax(action_logits, dim=-1)
         dist = torch.distributions.Categorical(action_probs)
-        
         if deterministic:
             actions = torch.argmax(action_probs, dim=-1)
         else:
             actions = dist.sample()
-            
         action_log_probs = dist.log_prob(actions)
         return actions, action_log_probs, rnn_states
 
-class CentralizedCritic(nn.Module):
+class CentralizedCritic_RNN(nn.Module):
     def __init__(self, cent_obs_dim, num_agents, device):
-        super(CentralizedCritic, self).__init__()
+        super(CentralizedCritic_RNN, self).__init__()
         self.device = device
         self.num_agents = num_agents
         self.agent_obs_dim = cent_obs_dim
         self.cent_obs_dim = cent_obs_dim * num_agents
-        
-        self.net = self._construct_net()
-        self._init_weights()
-
-    def _construct_net(self):
-        return nn.Sequential(
+        self.rnn_hidden_dim = 256
+        self.fc_in = nn.Sequential(
             nn.Linear(self.cent_obs_dim, 512),
             nn.LayerNorm(512),
-            nn.Tanh(),
-            nn.Linear(512, 256),
+            nn.ReLU()
+        )
+        self.rnn = nn.GRUCell(512, self.rnn_hidden_dim)
+        self.fc_out = nn.Sequential(
+            nn.Linear(self.rnn_hidden_dim, 256),
             nn.LayerNorm(256),
-            nn.Tanh(),
+            nn.ReLU(),
             nn.Linear(256, 1)
         )
-    
-    def _init_weights(self):
-        for layer in self.net:
-            if isinstance(layer, nn.Linear):
-                nn.init.orthogonal_(layer.weight, gain=1)
-                nn.init.constant_(layer.bias, 0)
+        orthogonal_init(self.fc_in[0])
+        orthogonal_init(self.rnn, gain=1.0)
+        orthogonal_init(self.fc_out[0])
+        orthogonal_init(self.fc_out[3], gain=1.0)
 
     def forward(self, cent_obs, rnn_states, masks):
         batch_size = cent_obs.shape[0]
         if cent_obs.shape[1] == self.agent_obs_dim:
             cent_obs = cent_obs.unsqueeze(1).repeat(1, self.num_agents, 1)
             cent_obs = cent_obs.reshape(batch_size, -1)
-        
-        values = self.net(cent_obs)
+        x = self.fc_in(cent_obs)
+        if rnn_states is None:
+            rnn_states = torch.zeros(batch_size, self.rnn_hidden_dim).to(self.device)
+        if masks is not None:
+            rnn_states = rnn_states * masks
+        rnn_states = self.rnn(x, rnn_states)
+        values = self.fc_out(rnn_states)
         return values, rnn_states
 
 class MAPPOPolicy(nn.Module):
     def __init__(self, env, name, handle, num_agents, value_coef=0.5, ent_coef=0.01, gamma=0.99, 
-                 batch_size=128,
-                 learning_rate=1e-4,
-                 use_cuda=False, 
-                 clip_epsilon=0.2, 
-                 ppo_epochs=4,
-                 minibatch_size=32,
-                 max_grad_norm=0.5,
-                 gae_lambda=0.95,
-                 reward_scaling=2.5):
+                 batch_size=128, learning_rate=1e-4, use_cuda=False, clip_epsilon=0.2, 
+                 ppo_epochs=4, minibatch_size=32, max_grad_norm=0.5,
+                 gae_lambda=0.95, reward_scaling=2.5):
         super(MAPPOPolicy, self).__init__()
         
         self.env = env
@@ -183,10 +197,12 @@ class MAPPOPolicy(nn.Module):
         self.log_probs_buf = np.empty(1, dtype=np.float32)
         self.replay_buffer = EpisodesBuffer()
         obs_dim = np.prod(self.view_space) + self.feature_space
-        self.actor = Actor(obs_dim, self.num_actions, device='cuda' if use_cuda else 'cpu')
-        self.critic = CentralizedCritic(obs_dim, num_agents, device='cuda' if use_cuda else 'cpu')
+        self.actor = Actor_RNN(obs_dim, self.num_actions, device='cuda' if use_cuda else 'cpu')
+        self.critic = CentralizedCritic_RNN(obs_dim, num_agents, device='cuda' if use_cuda else 'cpu')
         self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=learning_rate)
         self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=learning_rate)
+        self.actor_rnn_states = None
+        self.critic_rnn_states = None
         self.current_policy_loss = 0
         self.current_value_loss = 0
         self.current_entropy_loss = 0
@@ -209,16 +225,25 @@ class MAPPOPolicy(nn.Module):
     def act(self, **kwargs):
         device = next(self.actor.parameters()).device
         if isinstance(kwargs['obs'], torch.Tensor):
-            obs = kwargs['obs'].to(device).flatten(1)
+            obs = kwargs['obs'].to(device)
+            if len(obs.shape) == 4: 
+                obs = obs.flatten(1)
         else:
             obs = torch.FloatTensor(kwargs['obs']).to(device).flatten(1)
-            
         if isinstance(kwargs['feature'], torch.Tensor):
             feature = kwargs['feature'].to(device)
         else:
             feature = torch.FloatTensor(kwargs['feature']).to(device)
         combined_input = torch.cat([obs, feature], dim=-1)
-        actions, action_log_probs, _ = self.actor(combined_input, None, None)
+        batch_size = combined_input.size(0)
+        masks = kwargs.get('masks', torch.ones(batch_size, 1).to(device))
+        actions, action_log_probs, self.actor_rnn_states = self.actor(
+            combined_input, 
+            self.actor_rnn_states,
+            masks,
+            kwargs.get('available_actions', None),
+            kwargs.get('deterministic', False)
+        )
         
         if kwargs.get('return_log_prob', False):
             return actions.cpu().numpy().astype(np.int32), action_log_probs.detach().cpu().numpy()
@@ -289,14 +314,17 @@ class MAPPOPolicy(nn.Module):
         batch_size = batch_view.shape[0]
         advantages = advantages[:batch_size]
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        # Get centralized observations for critic
         cent_obs = self._collect_centralized_obs(batch_view, batch_feat)
         combined_input = torch.cat([batch_view.flatten(1), batch_feat], dim=-1)
-        # calculate value loss with centralized critic
+        # Calculate value loss with centralized critic
         values, _ = self.critic(cent_obs, None, None)
         values = values.squeeze(-1)
         value_loss = self.value_coef * F.mse_loss(values, batch_ret)
-        # calculate policy loss
-        dist = torch.distributions.Categorical(F.softmax(self.actor.net(combined_input), dim=-1))
+        # Calculate policy loss using the new get_action_logits method
+        action_logits = self.actor.get_action_logits(combined_input)
+        action_probs = F.softmax(action_logits, dim=-1)
+        dist = torch.distributions.Categorical(action_probs)
         new_logp = dist.log_prob(batch_act)
         ratio = torch.exp(new_logp - batch_old_logp)
         ratio = torch.clamp(ratio, 0.0, 10.0)
@@ -304,33 +332,25 @@ class MAPPOPolicy(nn.Module):
         surr1 = ratio * advantages
         surr2 = torch.clamp(ratio, 1-self.clip_epsilon, 1+self.clip_epsilon) * advantages
         policy_loss = -torch.min(surr1, surr2).mean()
-        # calculate entropy loss
+        # Calculate entropy loss
         entropy = dist.entropy().mean()
         entropy_loss = -self.ent_coef * entropy
-        # calculate total loss
+        # Calculate total loss
         total_loss = policy_loss + value_loss + entropy_loss
-        # store current losses
-        self.current_policy_loss = policy_loss.item()
-        self.current_value_loss = value_loss.item()
-        self.current_entropy_loss = entropy_loss.item()
-        self.current_total_loss = total_loss.item()
-        # optimize
+        # Optimize
         self.actor_optimizer.zero_grad()
         self.critic_optimizer.zero_grad()
         total_loss.backward()
-        # clip gradients
+        # Clip gradients
         torch.nn.utils.clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
         torch.nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
         self.actor_optimizer.step()
         self.critic_optimizer.step()
-        self.loss_history.append({
-            'policy_loss': self.current_policy_loss,
-            'value_loss': self.current_value_loss,
-            'entropy_loss': self.current_entropy_loss,
-            'total_loss': self.current_total_loss
-        })
-        approx_kl = ((ratio - 1) - torch.log(ratio)).mean().item()
-        return approx_kl > 0.015
+        # Store current losses
+        self.current_policy_loss = policy_loss.item()
+        self.current_value_loss = value_loss.item()
+        self.current_entropy_loss = entropy_loss.item()
+        self.current_total_loss = total_loss.item()
     def _resize_buffers(self, n):
         buffers = [self.view_buf, self.feature_buf, self.action_buf, 
                    self.reward_buf, self.log_probs_buf]
@@ -413,10 +433,23 @@ class MAPPOPolicy(nn.Module):
         else:
             obs = torch.FloatTensor(obs).unsqueeze(0)
             feature = torch.FloatTensor(feature).unsqueeze(0)
+            
         combined_input = torch.cat([obs.flatten(1), feature], dim=-1)
         combined_input = combined_input.repeat(1, self.num_agents)
-        values, _ = self.critic(combined_input, None, None)
+        batch_size = combined_input.size(0)
+        masks = torch.ones(batch_size, 1).to(combined_input.device)
+        
+        values, self.critic_rnn_states = self.critic(
+            combined_input,
+            self.critic_rnn_states,
+            masks
+        )
         return values.detach().cpu().numpy()
+
+    def reset_rnn_states(self):
+        """Reset RNN states at the beginning of new episodes"""
+        self.actor_rnn_states = None
+        self.critic_rnn_states = None
     def get_loss(self):
         return {
             'policy_loss': self.current_policy_loss,

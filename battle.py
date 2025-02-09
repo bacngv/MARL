@@ -78,9 +78,9 @@ def run_battle_with_red_opponent(red_algo, blue_algo, red_step, blue_step, red_m
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--red_algo', type=str, choices={'ac', 'mfac', 'mfq', 'iql', 'random', 'ppo'}, 
+    parser.add_argument('--red_algo', type=str, choices={'ac', 'mfac', 'mfq', 'iql', 'random', 'mappo'}, 
                        help='algorithm for main agent', required=True)
-    parser.add_argument('--blue_algo', type=str, choices={'ac', 'mfac', 'mfq', 'iql', 'random', 'ppo'}, 
+    parser.add_argument('--blue_algo', type=str, choices={'ac', 'mfac', 'mfq', 'iql', 'random', 'mappo'}, 
                        help='algorithm for opponent agent', required=True)
     parser.add_argument('--red_path', type=str,
                        help='path to red team model directory (required if not random)')
@@ -101,7 +101,7 @@ if __name__ == "__main__":
         red_model_path=args.red_path,
         blue_model_path=args.blue_path,
         render_dir=RENDER_DIR,
-        map_size=80,
+        map_size=30,
         max_steps=800,
         use_cuda=args.cuda 
     )
