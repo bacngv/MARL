@@ -3,463 +3,607 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-from torch.distributions import Categorical
+from torch.utils.data import DataLoader, TensorDataset
 
-from . import base
-from . import tools
+class EpisodesBufferEntry:
+    """Entry for episode buffer"""
+    def __init__(self):
+        self.views = []
+        self.features = []
+        self.actions = []
+        self.rewards = []
+        self.probs = []
+        self.terminal = False
 
-class MAPPO(base.ValueNet):
-    def __init__(self, env, name, handle, num_agents=30, use_cuda=False, memory_size=2**10, batch_size=64,
-                 update_every=5, use_mf=False, learning_rate=0.0001, clip_param=0.2,
-                 value_coef=0.5, entropy_coef=0.01, gamma=0.95, gae_lambda=0.95, tau=0.005):
-        super().__init__(env, name, handle, update_every=update_every, use_mf=use_mf,
-                        learning_rate=learning_rate, gamma=gamma)
-        
+    def append(self, view, feature, action, reward, alive, probs=None):
+        self.views.append(view.copy())
+        self.features.append(feature.copy())
+        self.actions.append(action)
+        self.rewards.append(reward)
+        if probs is not None:
+            self.probs.append(probs)
+        if not alive:
+            self.terminal = True
+            
+class EpisodesBuffer:
+    """Replay buffer to store a whole episode for all agents
+       one entry for one agent
+    """
+    def __init__(self, use_mean=False):
+        self.buffer = {}
+        self.use_mean = use_mean
+
+    def push(self, **kwargs):
+        view, feature = kwargs['state']
+        acts = kwargs['acts']
+        rewards = kwargs['rewards']
+        alives = kwargs['alives']
+        ids = kwargs['ids']
+
+        if self.use_mean:
+            probs = kwargs['prob']
+
+        buffer = self.buffer
+
+        for i in range(len(ids)):
+            entry = buffer.get(ids[i])
+            if entry is None:
+                entry = EpisodesBufferEntry()
+                buffer[ids[i]] = entry
+
+            if self.use_mean:
+                entry.append(view[i], feature[i], acts[i], rewards[i], alives[i], probs=probs[i])
+            else:
+                entry.append(view[i], feature[i], acts[i], rewards[i], alives[i])
+
+    def reset(self):
+        """ clear replay buffer """
+        self.buffer = {}
+
+    def episodes(self):
+        """ get episodes """
+        return self.buffer.values()
+
+def orthogonal_init(layer, gain=1.0):
+    for name, param in layer.named_parameters():
+        if 'bias' in name:
+            nn.init.constant_(param, 0)
+        elif 'weight' in name:
+            nn.init.orthogonal_(param, gain=gain)
+
+class Actor_RNN(nn.Module):
+    def __init__(self, obs_space, act_space, device):
+        super(Actor_RNN, self).__init__()
+        self.device = device
+        self.obs_space = obs_space
+        self.act_space = act_space
+        self.rnn_hidden_dim = 256
+        self.fc_in = nn.Sequential(
+            nn.Linear(obs_space, 256),
+            nn.LayerNorm(256),
+            nn.ReLU()
+        )
+        self.rnn = nn.GRUCell(256, self.rnn_hidden_dim)
+        self.fc_out = nn.Linear(self.rnn_hidden_dim, act_space)
+        orthogonal_init(self.fc_in[0])
+        orthogonal_init(self.rnn, gain=1.0)
+        orthogonal_init(self.fc_out, gain=0.01)
+
+    def get_action_logits(self, obs):
+        """Direct computation of action logits without RNN for training"""
+        x = self.fc_in(obs)
+        rnn_states = torch.zeros(obs.size(0), self.rnn_hidden_dim).to(self.device)
+        rnn_out = self.rnn(x, rnn_states)
+        return self.fc_out(rnn_out)
+
+    def forward(self, obs, rnn_states, masks=None, available_actions=None, deterministic=False):
+        batch_size = obs.size(0)
+        x = self.fc_in(obs)
+        if rnn_states is None:
+            rnn_states = torch.zeros(batch_size, self.rnn_hidden_dim).to(self.device)
+        if rnn_states.size(0) != batch_size:
+            rnn_states = rnn_states[:batch_size]
+            if rnn_states.size(0) < batch_size:
+                padding = torch.zeros(batch_size - rnn_states.size(0), self.rnn_hidden_dim).to(self.device)
+                rnn_states = torch.cat([rnn_states, padding], dim=0)
+        if masks is not None:
+            if masks.dim() == 1:
+                masks = masks.unsqueeze(1)
+            if masks.size(0) != batch_size:
+                masks = masks[:batch_size]
+            rnn_states = rnn_states * masks
+        rnn_states = self.rnn(x, rnn_states)
+        action_logits = self.fc_out(rnn_states)
+        if available_actions is not None:
+            action_logits = action_logits.masked_fill(~available_actions, float('-inf'))
+        action_probs = F.softmax(action_logits, dim=-1)
+        dist = torch.distributions.Categorical(action_probs)
+        if deterministic:
+            actions = torch.argmax(action_probs, dim=-1)
+        else:
+            actions = dist.sample()
+        action_log_probs = dist.log_prob(actions)
+        return actions, action_log_probs, rnn_states
+
+class CentralizedCritic_RNN(nn.Module):
+    def __init__(self, cent_obs_dim, num_agents, device):
+        super(CentralizedCritic_RNN, self).__init__()
+        self.device = device
         self.num_agents = num_agents
-        self.clip_param = clip_param
+        self.agent_obs_dim = cent_obs_dim
+        self.cent_obs_dim = cent_obs_dim * num_agents
+        self.rnn_hidden_dim = 256
+        self.fc_in = nn.Sequential(
+            nn.Linear(self.cent_obs_dim, 512),
+            nn.LayerNorm(512),
+            nn.ReLU()
+        )
+        self.rnn = nn.GRUCell(512, self.rnn_hidden_dim)
+        self.fc_out = nn.Sequential(
+            nn.Linear(self.rnn_hidden_dim, 256),
+            nn.LayerNorm(256),
+            nn.ReLU(),
+            nn.Linear(256, 1)
+        )
+        orthogonal_init(self.fc_in[0])
+        orthogonal_init(self.rnn, gain=1.0)
+        orthogonal_init(self.fc_out[0])
+        orthogonal_init(self.fc_out[3], gain=1.0)
+
+    def forward(self, cent_obs, rnn_states, masks):
+        batch_size = cent_obs.shape[0]
+        if cent_obs.shape[1] == self.agent_obs_dim:
+            cent_obs = cent_obs.unsqueeze(1).repeat(1, self.num_agents, 1)
+            cent_obs = cent_obs.reshape(batch_size, -1)
+        x = self.fc_in(cent_obs)
+        if rnn_states is None:
+            rnn_states = torch.zeros(batch_size, self.rnn_hidden_dim).to(self.device)
+        if masks is not None:
+            rnn_states = rnn_states * masks
+        rnn_states = self.rnn(x, rnn_states)
+        values = self.fc_out(rnn_states)
+        return values, rnn_states
+
+class MAPPOPolicy(nn.Module):
+    def __init__(self, env, name, handle, num_agents, value_coef=0.5, ent_coef=0.01, gamma=0.99, 
+                 batch_size=128, learning_rate=1e-4, use_cuda=False, clip_epsilon=0.2, 
+                 ppo_epochs=4, minibatch_size=32, max_grad_norm=0.5,
+                 gae_lambda=0.95, reward_scaling=2.5):
+        super(MAPPOPolicy, self).__init__()
+        
+        self.env = env
+        self.name = name
+        self.num_agents = num_agents
+        self.view_space = env.unwrapped.env.get_view_space(handle)
+        assert len(self.view_space) == 3
+        self.feature_space = env.unwrapped.env.get_feature_space(handle)[0]
+        self.num_actions = env.unwrapped.env.get_action_space(handle)[0]
+        self.gamma = gamma
+        self.batch_size = batch_size
+        self.learning_rate = learning_rate
         self.value_coef = value_coef
-        self.entropy_coef = entropy_coef
-        self.gae_lambda = gae_lambda
-        self.tau = tau
+        self.ent_coef = ent_coef
+        self.clip_epsilon = clip_epsilon
+        self.ppo_epochs = ppo_epochs
+        self.minibatch_size = minibatch_size
         self.use_cuda = use_cuda
+        self.max_grad_norm = max_grad_norm
+        self.gae_lambda = gae_lambda
+        self.reward_scaling = reward_scaling
         
-        # Modified replay buffer to handle multiple agents
-        self.replay_buffer = tools.MemoryGroup(self.view_space, self.feature_space,
-                                             self.num_actions, memory_size, batch_size, 
-                                             sub_len=self.num_agents)
+        # Initialize separate buffers for each agent
+        self.view_bufs = [np.empty([1,] + list(self.view_space)) for _ in range(num_agents)]
+        self.feature_bufs = [np.empty([1,] + [self.feature_space]) for _ in range(num_agents)]
+        self.action_bufs = [np.empty(1, dtype=np.int32) for _ in range(num_agents)]
+        self.reward_bufs = [np.empty(1, dtype=np.float32) for _ in range(num_agents)]
+        self.log_probs_bufs = [np.empty(1, dtype=np.float32) for _ in range(num_agents)]
         
-        self.actor = nn.ModuleList([self._construct_actor() for _ in range(num_agents)])
-        self.critic = self._construct_critic()  # Centralized critic
-        self.target_actor = nn.ModuleList([self._construct_actor() for _ in range(num_agents)])
-        self.target_critic = self._construct_critic()  # Centralized target critic
+        # Initialize separate replay buffers for each agent
+        self.replay_buffers = [EpisodesBuffer() for _ in range(num_agents)]
         
-        # Initialize target networks
-        for i in range(num_agents):
-            self.target_actor[i].load_state_dict(self.actor[i].state_dict())
-        self.target_critic.load_state_dict(self.critic.state_dict())
-        
-        # Move models to CUDA if needed
-        if self.use_cuda:
-            for i in range(num_agents):
-                self.actor[i] = self.actor[i].cuda()
-                self.target_actor[i] = self.target_actor[i].cuda()
-            self.critic = self.critic.cuda()
-            self.target_critic = self.target_critic.cuda()
-        
-        # Separate optimizers for each actor and one for critic
-        self.actor_optims = [torch.optim.Adam(self.get_params(actor), lr=learning_rate) 
-                            for actor in self.actor]
-        self.critic_optim = torch.optim.Adam(self.get_params(self.critic), lr=learning_rate)
-
-
-    def _construct_actor(self):
-        temp_dict = nn.ModuleDict()
-        temp_dict['conv1'] = nn.Conv2d(in_channels=self.view_space[2], out_channels=32, kernel_size=3)
-        temp_dict['conv2'] = nn.Conv2d(in_channels=32, out_channels=32, kernel_size=3)
-        temp_dict['obs_linear'] = nn.Linear(self.get_flatten_dim(temp_dict), 256)
-        temp_dict['emb_linear'] = nn.Linear(self.feature_space, 32)
-        if self.use_mf:
-            temp_dict['prob_emb_linear'] = nn.Sequential(
-                nn.Linear(self.num_actions, 64),
-                nn.ReLU(),
-                nn.Linear(64, 32)
-            )
-        temp_dict['final_linear'] = nn.Sequential(
-            nn.Linear(320 if self.use_mf else 288, 128),
-            nn.ReLU(),
-            nn.Linear(128, 64),
-            nn.ReLU(),
-            nn.Linear(64, self.num_actions)
-        )
-        return temp_dict
-
-    def _construct_critic(self):
-        temp_dict = nn.ModuleDict()
-        
-        # Process each agent's observations separately first
-        temp_dict['conv1_list'] = nn.ModuleList([
-            nn.Conv2d(in_channels=self.view_space[2], out_channels=32, kernel_size=3)
-            for _ in range(self.num_agents)
+        obs_dim = np.prod(self.view_space) + self.feature_space
+        # Create separate actors for each agent but share the critic
+        self.actors = nn.ModuleList([
+            Actor_RNN(obs_dim, self.num_actions, device='cuda' if use_cuda else 'cpu')
+            for _ in range(num_agents)
         ])
-        temp_dict['conv2_list'] = nn.ModuleList([
-            nn.Conv2d(in_channels=32, out_channels=32, kernel_size=3)
-            for _ in range(self.num_agents)
-        ])
+        self.critic = CentralizedCritic_RNN(obs_dim, num_agents, device='cuda' if use_cuda else 'cpu')
         
-        # Calculate flattened dimension for one agent
-        sample_obs = torch.zeros(1, self.view_space[2], self.view_space[0], self.view_space[1])
-        conv1_out = temp_dict['conv1_list'][0](sample_obs)
-        conv2_out = temp_dict['conv2_list'][0](conv1_out)
-        single_agent_dim = conv2_out.flatten().size()[0]
+        # Separate optimizers for each actor
+        self.actor_optimizers = [
+            torch.optim.Adam(actor.parameters(), lr=learning_rate)
+            for actor in self.actors
+        ]
+        self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=learning_rate)
         
-        # Linear layers
-        temp_dict['obs_linear'] = nn.Linear(single_agent_dim * self.num_agents, 256)
-        temp_dict['emb_linear'] = nn.Linear(self.feature_space * self.num_agents, 32)
+        # RNN states for each agent
+        self.actor_rnn_states = [None for _ in range(num_agents)]
+        self.critic_rnn_states = None
         
-        if self.use_mf:
-            temp_dict['prob_emb_linear'] = nn.Sequential(
-                nn.Linear(self.num_actions * self.num_agents, 64),
-                nn.ReLU(),
-                nn.Linear(64, 32)
-            )
+        # Loss tracking for each agent
+        self.current_policy_losses = [0 for _ in range(num_agents)]
+        self.current_value_loss = 0
+        self.current_entropy_losses = [0 for _ in range(num_agents)]
+        self.current_total_losses = [0 for _ in range(num_agents)]
+        self.loss_history = []
+    def _convert_to_tensors(self, view, feature, action, reward, log_probs):
+        device = torch.device('cuda' if self.use_cuda else 'cpu')
+        view_tensor = torch.FloatTensor(view).to(device)
+        feature_tensor = torch.FloatTensor(feature).to(device)
+        action_tensor = torch.LongTensor(action).to(device)
+        reward_tensor = torch.FloatTensor(reward).to(device)
+        log_probs_tensor = torch.FloatTensor(log_probs).to(device)
+        
+        return view_tensor, feature_tensor, action_tensor, reward_tensor, log_probs_tensor
+    def flush_buffer(self, agent_idx, **kwargs):
+        self.replay_buffers[agent_idx].push(**kwargs)
+
+    def act(self, agent_idx, **kwargs):
+        device = next(self.actors[agent_idx].parameters()).device
+        if isinstance(kwargs['obs'], torch.Tensor):
+            obs = kwargs['obs'].to(device)
+            if len(obs.shape) == 4:
+                obs = obs.flatten(1)
+        else:
+            obs = torch.FloatTensor(kwargs['obs']).to(device).flatten(1)
             
-        temp_dict['final_linear'] = nn.Sequential(
-            nn.Linear(320 if self.use_mf else 288, 128),
-            nn.ReLU(),
-            nn.Linear(128, 64),
-            nn.ReLU(),
-            nn.Linear(64, self.num_agents)
+        if isinstance(kwargs['feature'], torch.Tensor):
+            feature = kwargs['feature'].to(device)
+        else:
+            feature = torch.FloatTensor(kwargs['feature']).to(device)
+            
+        combined_input = torch.cat([obs, feature], dim=-1)
+        batch_size = combined_input.size(0)
+        masks = kwargs.get('masks', torch.ones(batch_size, 1).to(device))
+        
+        actions, action_log_probs, self.actor_rnn_states[agent_idx] = self.actors[agent_idx](
+            combined_input,
+            self.actor_rnn_states[agent_idx],
+            masks,
+            kwargs.get('available_actions', None),
+            kwargs.get('deterministic', False)
         )
-        return temp_dict
+        
+        if kwargs.get('return_log_prob', False):
+            return actions.cpu().numpy().astype(np.int32), action_log_probs.detach().cpu().numpy()
+        else:
+            return actions.cpu().numpy().astype(np.int32)
 
-
-
-    def act(self, obs=None, feature=None, prob=None, eps=None):
-        """
-        Get action from the agent.
+    def _collect_centralized_obs(self, obs_batch, feature_batch):
+        """Combine observations from all agents for centralized critic"""
+        batch_size = obs_batch.shape[0]
+        obs_dim = np.prod(self.view_space) + self.feature_space
+        if len(obs_batch.shape) == 4: 
+            obs_batch = obs_batch.unsqueeze(1)
+            feature_batch = feature_batch.unsqueeze(1)
+        # Khởi tạo tensor zeros để chứa observations của tất cả agents
+        cent_obs = torch.zeros(batch_size, self.num_agents * obs_dim).to(obs_batch.device)
         
-        Args:
-            obs: observation tensor
-            feature: feature tensor
-            prob: probability tensor
-            eps: epsilon for exploration
-            
-        Returns:
-            numpy array of actions
-        """
-        with torch.no_grad():
-            # Process single observation for the current agent
-            a_h = F.relu(self.actor[0]['conv2'](
-                F.relu(self.actor[0]['conv1'](obs)))).flatten(start_dim=1)
-            a_h = torch.cat([self.actor[0]['obs_linear'](a_h), 
-                           self.actor[0]['emb_linear'](feature)], -1)
-            
-            if self.use_mf and prob is not None:
-                a_h = torch.cat([a_h, self.actor[0]['prob_emb_linear'](prob)], -1)
-                
-            logits = self.actor[0]['final_linear'](a_h)
-            probs = F.softmax(logits, dim=-1)
-            
-            # Apply epsilon-greedy if eps is provided
-            if eps is not None:
-                random_action = torch.randint(0, self.num_actions, probs.shape[:-1])
-                random_mask = torch.rand(probs.shape[:-1]) < eps
-                if self.use_cuda:
-                    random_action = random_action.cuda()
-                    random_mask = random_mask.cuda()
-                action = torch.where(random_mask, random_action, probs.argmax(dim=-1))
-            else:
-                dist = Categorical(probs)
-                action = dist.sample()
-            
-            # Return action as numpy array
-            return action.cpu().numpy()
-
-    def get_action_and_value(self, obs_n, feature_n, prob_n=None, action_n=None):
-        """Get actions, log probabilities, entropies and values for all agents"""
-        batch_size = obs_n[0].shape[0]
-        actions = []
-        log_probs = []
-        entropies = []
+        # Chỉ điền data cho các agent còn sống
+        for i in range(min(self.num_agents, obs_batch.shape[1])):
+            start_idx = i * obs_dim
+            end_idx = start_idx + obs_dim
+            agent_obs = torch.cat([
+                obs_batch[:, i].flatten(1),
+                feature_batch[:, i]
+            ], dim=-1)
+            cent_obs[:, start_idx:end_idx] = agent_obs
         
-        # Get actions from each agent's actor network
-        for i in range(self.num_agents):
-            # Process observations through conv layers
-            a_h = F.relu(self.actor[i]['conv2'](
-                F.relu(self.actor[i]['conv1'](obs_n[i])))).flatten(start_dim=1)
-                
-            # Process embeddings
-            emb = self.actor[i]['emb_linear'](feature_n[i])
-            
-            # Ensure both tensors have the same dimensions before concatenating
-            if len(a_h.shape) != len(emb.shape):
-                if len(a_h.shape) < len(emb.shape):
-                    a_h = a_h.unsqueeze(-1)
-                else:
-                    emb = emb.unsqueeze(-1)
-                    
-            # Concatenate processed observations and embeddings
-            a_h = torch.cat([a_h, emb], dim=-1)
-            
-            if self.use_mf and prob_n is not None:
-                prob_emb = self.actor[i]['prob_emb_linear'](prob_n[i])
-                # Ensure prob_emb has same dimensions
-                if len(prob_emb.shape) != len(a_h.shape):
-                    if len(prob_emb.shape) < len(a_h.shape):
-                        prob_emb = prob_emb.unsqueeze(-1)
-                    else:
-                        a_h = a_h.unsqueeze(-1)
-                a_h = torch.cat([a_h, prob_emb], dim=-1)
-            
-            # Get action logits and probabilities
-            logits = self.actor[i]['final_linear'](a_h)
-            probs = F.softmax(logits, dim=-1)
-            dist = Categorical(probs)
-            
-            if action_n is None:
-                action = dist.sample()
-            else:
-                action = action_n[i]
-            
-            actions.append(action)
-            log_probs.append(dist.log_prob(action))
-            entropies.append(dist.entropy())
-        
-        # Get centralized value
-        values = self.get_value(obs_n, feature_n, prob_n)
-        
-        return actions, log_probs, entropies, values
-
-    def get_value(self, obs_n, feature_n, prob_n=None):
-        """Get centralized value estimate for all agents"""
-        batch_size = obs_n[0].shape[0]
-        
-        # Process each agent's observations separately
-        processed_obs = []
-        for i in range(self.num_agents):
-            x = F.relu(self.critic['conv1_list'][i](obs_n[i]))
-            x = F.relu(self.critic['conv2_list'][i](x))
-            processed_obs.append(x.flatten(start_dim=1))
-        
-        # Concatenate all processed observations
-        concat_obs = torch.cat(processed_obs, dim=1)
-        concat_feature = torch.cat(feature_n, dim=1)
-        
-        # Process through critic network
-        c_h = torch.cat([
-            self.critic['obs_linear'](concat_obs),
-            self.critic['emb_linear'](concat_feature)
-        ], dim=-1)
-        
-        if self.use_mf and prob_n is not None:
-            concat_prob = torch.cat(prob_n, dim=1)
-            prob_emb = self.critic['prob_emb_linear'](concat_prob)
-            c_h = torch.cat([c_h, prob_emb], dim=-1)
-        
-        values = self.critic['final_linear'](c_h)
-        
-        return values
-
-    def update(self):
-        """Soft update target networks using tau parameter"""
-        # Update all actors
-        for i in range(self.num_agents):
-            for param, target_param in zip(self.actor[i].parameters(), 
-                                         self.target_actor[i].parameters()):
-                target_param.data.copy_(self.tau * param.data + 
-                                      (1 - self.tau) * target_param.data)
-        
-        # Update critic
-        for param, target_param in zip(self.critic.parameters(), 
-                                     self.target_critic.parameters()):
-            target_param.data.copy_(self.tau * param.data + 
-                                  (1 - self.tau) * target_param.data)
+        # Các agent đã chết sẽ giữ nguyên giá trị 0 trong cent_obs
+        return cent_obs
 
     def train(self, cuda):
-        self.replay_buffer.tight()
-        batch_num = self.replay_buffer.get_batch_num()
-        total_loss = 0
-        actor_losses = [0] * self.num_agents
-        critic_loss = 0
-        entropy_losses = [0] * self.num_agents
+        total_policy_loss = 0
+        total_value_loss = 0
+        total_entropy_loss = 0
         
-        for i in range(batch_num):
-            # Sample batch for each agent
-            obs_n, feat_n, obs_next_n, feat_next_n, dones_n, rewards_n, acts_n, masks_n = \
-                self.replay_buffer.sample()
-            
-            # Process tensors for each agent
-            obs_n = [torch.FloatTensor(obs) for obs in obs_n]
-            obs_next_n = [torch.FloatTensor(obs_next) for obs_next in obs_next_n]
-            
-            # Check and handle observation dimensions
-            for idx in range(len(obs_n)):
-                if len(obs_n[idx].shape) == 3:  # If missing batch dimension
-                    obs_n[idx] = obs_n[idx].unsqueeze(0)
-                if len(obs_next_n[idx].shape) == 3:
-                    obs_next_n[idx] = obs_next_n[idx].unsqueeze(0)
+        # Process each agent's data
+        for agent_idx in range(self.num_agents):
+            batch_data = list(self.replay_buffers[agent_idx].episodes())
+            if not batch_data:
+                continue
                 
-                # Now permute with proper dimensions
-                obs_n[idx] = obs_n[idx].permute(0, 3, 1, 2)
-                obs_next_n[idx] = obs_next_n[idx].permute(0, 3, 1, 2)
-            
-            feat_n = [torch.FloatTensor(feat) for feat in feat_n]
-            feat_next_n = [torch.FloatTensor(feat_next) for feat_next in feat_next_n]
-            acts_n = [torch.LongTensor(acts) for acts in acts_n]
-            
-            # Handle rewards - ensure they're in the correct format
-            if isinstance(rewards_n, (list, tuple)):
-                # If rewards_n is already a list of rewards
-                rewards_n = [torch.FloatTensor([r] if isinstance(r, (float, np.float32)) else r) 
-                            for r in rewards_n]
-            else:
-                # If rewards_n is a single value, convert to list of tensors
-                rewards_n = [torch.FloatTensor([rewards_n])] * self.num_agents
+            self.replay_buffers[agent_idx].reset()
+            n = sum(len(ep.rewards) for ep in batch_data)
+            if n == 0:
+                continue
                 
-            # Handle dones in a similar way
-            if isinstance(dones_n, (list, tuple)):
-                dones_n = [torch.FloatTensor([d] if isinstance(d, (float, np.float32)) else d) 
-                          for d in dones_n]
-            else:
-                dones_n = [torch.FloatTensor([dones_n])] * self.num_agents
+            self._resize_buffers(n, agent_idx)
+            buffer_data = self._fill_buffers(batch_data, agent_idx)
+            if buffer_data is None:
+                continue
                 
-            # Handle masks in a similar way
-            if isinstance(masks_n, (list, tuple)):
-                masks_n = [torch.FloatTensor([m] if isinstance(m, (float, np.float32)) else m) 
-                          for m in masks_n]
-            else:
-                masks_n = [torch.FloatTensor([masks_n])] * self.num_agents
-            
-            if cuda:
-                obs_n = [obs.cuda() for obs in obs_n]
-                obs_next_n = [obs_next.cuda() for obs_next in obs_next_n]
-                feat_n = [feat.cuda() for feat in feat_n]
-                feat_next_n = [feat_next.cuda() for feat_next in feat_next_n]
-                acts_n = [acts.cuda() for acts in acts_n]
-                rewards_n = [rewards.cuda() for rewards in rewards_n]
-                dones_n = [dones.cuda() for dones in dones_n]
-                masks_n = [masks.cuda() for masks in masks_n]
-            
-            # Get new action probabilities and values
-            _, new_log_probs_n, entropies_n, values = self.get_action_and_value(
-                obs_n, feat_n, action_n=acts_n)
-            
-            # Calculate advantages for each agent
-            advantages_n = [torch.zeros_like(rewards) for rewards in rewards_n]
-            lastgaelam_n = [0] * self.num_agents
+            view, feature, action, reward, log_probs = buffer_data
+            device = torch.device('cuda' if cuda else 'cpu')
+            tensor_data = self._convert_to_tensors(view, feature, action, reward, log_probs)
+            dataset = TensorDataset(*tensor_data)
+            loader = DataLoader(dataset, batch_size=self.minibatch_size, shuffle=True)
             
             with torch.no_grad():
-                next_values = self.get_value(obs_next_n, feat_next_n)
+                cent_obs = self._collect_centralized_obs(tensor_data[0], tensor_data[1])
+                old_values = self.critic(cent_obs, None, None)[0].flatten()
+                advantages = (tensor_data[3] - old_values).cpu().numpy()
+                advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+                advantages = torch.FloatTensor(advantages).to(device)
                 
-            # Calculate GAE for each agent
-            for agent_idx in range(self.num_agents):
-                for t in reversed(range(len(rewards_n[agent_idx]))):
-                    if t == len(rewards_n[agent_idx]) - 1:
-                        nextnonterminal = 1.0 - dones_n[agent_idx][t]
-                        nextvalues = next_values[t][agent_idx]
-                    else:
-                        nextnonterminal = 1.0 - dones_n[agent_idx][t]
-                        nextvalues = values[t + 1][agent_idx]
-                    
-                    delta = rewards_n[agent_idx][t] + self.gamma * nextvalues * \
-                          nextnonterminal - values[t][agent_idx]
-                    advantages_n[agent_idx][t] = lastgaelam_n[agent_idx] = delta + \
-                        self.gamma * self.gae_lambda * nextnonterminal * lastgaelam_n[agent_idx]
-            
-            # Calculate returns and normalize advantages
-            returns_n = [advantages + values[:, i] for i, advantages in 
-                        enumerate(advantages_n)]
-            advantages_n = [(advantages - advantages.mean()) / (advantages.std() + 1e-8)
-                          for advantages in advantages_n]
-            
-            # Calculate losses for each agent
-            policy_losses = []
-            entropy_losses = []
-            
-            for agent_idx in range(self.num_agents):
-                ratio = torch.exp(new_log_probs_n[agent_idx])
-                surr1 = ratio * advantages_n[agent_idx]
-                surr2 = torch.clamp(ratio, 1 - self.clip_param, 1 + self.clip_param) * \
-                        advantages_n[agent_idx]
-                policy_loss = -torch.min(surr1, surr2).mean()
-                entropy_loss = -entropies_n[agent_idx].mean()
-                
-                policy_losses.append(policy_loss)
-                entropy_losses.append(entropy_loss)
-            
-            # Value loss (centralized critic)
-            value_loss = sum(F.mse_loss(values[:, i], returns_n[i]) 
-                          for i in range(self.num_agents))
-            
-            # Update networks
-            for agent_idx in range(self.num_agents):
-                self.actor_optims[agent_idx].zero_grad()
-                loss = policy_losses[agent_idx] + self.entropy_coef * entropy_losses[agent_idx]
-                loss.backward(retain_graph=True)
-                self.actor_optims[agent_idx].step()
-                
-                actor_losses[agent_idx] += policy_losses[agent_idx].item()
-                entropy_losses[agent_idx] += entropy_losses[agent_idx].item()
-            
-            self.critic_optim.zero_grad()
-            (self.value_coef * value_loss).backward()
-            self.critic_optim.step()
-            
-            critic_loss += value_loss.item()
-            
-            if i % 50 == 0:
-                print(f'[*] Batch {i}/{batch_num}')
-                for agent_idx in range(self.num_agents):
-                    print(f'Agent {agent_idx} - Policy Loss: {policy_losses[agent_idx].item():.4f}, '
-                          f'Entropy Loss: {entropy_losses[agent_idx].item():.4f}')
-                print(f'Critic Loss: {value_loss.item():.4f}\n')
+            for _ in range(self.ppo_epochs):
+                for batch in loader:
+                    losses = self._update_network(batch, advantages, agent_idx)
+                    total_policy_loss += losses['policy_loss']
+                    total_value_loss += losses['value_loss']
+                    total_entropy_loss += losses['entropy_loss']
+        
+        # Average losses across agents
+        num_updates = self.num_agents * self.ppo_epochs
+        if num_updates > 0:
+            self.current_policy_loss = total_policy_loss / num_updates
+            self.current_value_loss = total_value_loss / num_updates
+            self.current_entropy_loss = total_entropy_loss / num_updates
+            self.current_total_loss = (self.current_policy_loss + 
+                                     self.current_value_loss + 
+                                     self.current_entropy_loss)
 
+    def _update_network(self, batch, advantages, agent_idx):
+        batch_view, batch_feat, batch_act, batch_ret, batch_old_logp = batch
+        batch_size = batch_view.shape[0]
+        advantages = advantages[:batch_size]
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        
+        # Get centralized observations for critic
+        cent_obs = self._collect_centralized_obs(batch_view, batch_feat)
+        combined_input = torch.cat([batch_view.flatten(1), batch_feat], dim=-1)
+        
+        # Calculate value loss with centralized critic
+        values, _ = self.critic(cent_obs, None, None)
+        values = values.squeeze(-1)
+        value_loss = self.value_coef * F.mse_loss(values, batch_ret)
+        
+        # Calculate policy loss for specific agent
+        action_logits = self.actors[agent_idx].get_action_logits(combined_input)
+        action_probs = F.softmax(action_logits, dim=-1)
+        dist = torch.distributions.Categorical(action_probs)
+        new_logp = dist.log_prob(batch_act)
+        ratio = torch.exp(new_logp - batch_old_logp)
+        ratio = torch.clamp(ratio, 0.0, 10.0)
+        
+        # PPO policy loss
+        surr1 = ratio * advantages
+        surr2 = torch.clamp(ratio, 1-self.clip_epsilon, 1+self.clip_epsilon) * advantages
+        policy_loss = -torch.min(surr1, surr2).mean()
+        
+        # Calculate entropy loss
+        entropy = dist.entropy().mean()
+        entropy_loss = -self.ent_coef * entropy
+        
+        # Calculate total loss
+        total_loss = policy_loss + value_loss + entropy_loss
+        
+        # Optimize
+        self.actor_optimizers[agent_idx].zero_grad()
+        self.critic_optimizer.zero_grad()
+        total_loss.backward()
+        
+        # Clip gradients
+        torch.nn.utils.clip_grad_norm_(self.actors[agent_idx].parameters(), self.max_grad_norm)
+        torch.nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
+        
+        self.actor_optimizers[agent_idx].step()
+        self.critic_optimizer.step()
+        
+        return {
+            'policy_loss': policy_loss.item(),
+            'value_loss': value_loss.item(),
+            'entropy_loss': entropy_loss.item(),
+            'total_loss': total_loss.item()
+        }
+    def _resize_buffers(self, n, agent_idx):
+        buffers = [
+            self.view_bufs[agent_idx], 
+            self.feature_bufs[agent_idx],
+            self.action_bufs[agent_idx],
+            self.reward_bufs[agent_idx],
+            self.log_probs_bufs[agent_idx]
+        ]
+        shapes = [list(self.view_space), [self.feature_space], 1, 1, 1]
+        
+        for buf, shape in zip(buffers, shapes):
+            if len(buf.shape) == 1:
+                buf.resize(n, refcheck=False)
+            else:
+                buf.resize([n] + shape, refcheck=False)
+    def _fill_buffers(self, batch_data, agent_idx):
+        """Fill the buffers with episode data for a specific agent"""
+        ct = 0
+        
+        for episode in batch_data:
+            m = len(episode.rewards)
+            returns, advantages = self._calculate_returns(episode)
+            
+            self.view_bufs[agent_idx][ct:ct+m] = episode.views
+            self.feature_bufs[agent_idx][ct:ct+m] = episode.features
+            self.action_bufs[agent_idx][ct:ct+m] = episode.actions
+            self.reward_bufs[agent_idx][ct:ct+m] = returns
+            
+            if hasattr(episode, 'probs') and len(episode.probs) > 0:
+                self.log_probs_bufs[agent_idx][ct:ct+m] = np.log(episode.probs)
+            else:
+                views = torch.FloatTensor(episode.views)
+                features = torch.FloatTensor(episode.features)
+                
+                with torch.no_grad():
+                    _, recalc_log_probs = self.act(
+                        agent_idx=agent_idx,
+                        obs=views,
+                        feature=features,
+                        return_log_prob=True
+                    )
+                self.log_probs_bufs[agent_idx][ct:ct+m] = recalc_log_probs
+                
+            ct += m
+            
+        return (
+            self.view_bufs[agent_idx][:ct],
+            self.feature_bufs[agent_idx][:ct],
+            self.action_bufs[agent_idx][:ct],
+            self.reward_bufs[agent_idx][:ct],
+            self.log_probs_bufs[agent_idx][:ct]
+        )
+    def _calculate_returns(self, episode):
+        """Calculate returns using GAE with modified reward scaling"""
+        returns = np.zeros_like(episode.rewards, dtype=np.float32)
+        advantages = np.zeros_like(episode.rewards, dtype=np.float32)
+        
+        # apply reward scaling and clipping
+        scaled_rewards = np.clip(
+            np.array(episode.rewards, dtype=np.float32) * self.reward_scaling,
+            -10000.0, 10000.0  
+        )
+        
+        with torch.no_grad():
+            values = []
+            combined_obs = []
+            
+            for i in range(len(episode.views)):
+                view = torch.FloatTensor(episode.views[i])
+                feature = torch.FloatTensor(episode.features[i])
+                
+                if len(view.shape) == 3:
+                    view = view.unsqueeze(0)
+                if len(feature.shape) == 1:
+                    feature = feature.unsqueeze(0)
+                    
+                if self.use_cuda:
+                    view = view.cuda()
+                    feature = feature.cuda()
+                    
+                combined_input = torch.cat([view.flatten(1), feature], dim=-1)
+                combined_obs.append(combined_input)
+                
+            combined_obs = torch.cat(combined_obs, dim=0)
+            combined_obs = combined_obs.repeat(1, self.num_agents)
+            masks = torch.ones(combined_obs.size(0), 1).to(combined_obs.device)
+            
+            values, _ = self.critic(combined_obs, None, masks)
+            values = values.cpu().numpy().flatten()
+                
+        # calculate GAE with normalization
+        gae = 0
+        for t in reversed(range(len(scaled_rewards))):
+            if t == len(scaled_rewards) - 1:
+                next_value = 0 if episode.terminal else values[t]  
+            else:
+                next_value = values[t + 1]
+                
+            delta = scaled_rewards[t] + self.gamma * next_value - values[t]
+            gae = delta + self.gamma * self.gae_lambda * (1 - episode.terminal) * gae
+            advantages[t] = gae
+            returns[t] = advantages[t] + values[t]
+            
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+            
+        return returns, advantages
+    def _calc_value(self, obs, feature):
+        if self.use_cuda:
+            obs = torch.FloatTensor(obs).cuda().unsqueeze(0)
+            feature = torch.FloatTensor(feature).cuda().unsqueeze(0)
+        else:
+            obs = torch.FloatTensor(obs).unsqueeze(0)
+            feature = torch.FloatTensor(feature).unsqueeze(0)
+            
+        combined_input = torch.cat([obs.flatten(1), feature], dim=-1)
+        combined_input = combined_input.repeat(1, self.num_agents)
+        batch_size = combined_input.size(0)
+        masks = torch.ones(batch_size, 1).to(combined_input.device)
+        
+        values, self.critic_rnn_states = self.critic(
+            combined_input,
+            self.critic_rnn_states,
+            masks
+        )
+        return values.detach().cpu().numpy()
+
+    def reset_rnn_states(self):
+        """Reset RNN states for all agents at the beginning of new episodes"""
+        self.actor_rnn_states = [None for _ in range(self.num_agents)]
+        self.critic_rnn_states = None
+    def get_loss(self):
+        return {
+            'policy_loss': self.current_policy_loss,
+            'value_loss': self.current_value_loss,
+            'entropy_loss': self.current_entropy_loss,
+            'total_loss': self.current_total_loss
+        }
+
+    def get_loss_history(self):
+        return self.loss_history
+
+    def get_all_params(self):
+        all_params = []
+        for param in self.actors.parameters():
+            if param.requires_grad:
+                all_params.append(param)
+        for param in self.critic.parameters():
+            if param.requires_grad:
+                all_params.append(param)
+                
+        return all_params
+
+    def set_params(self, params):
+        actor_params = [p for p in self.actor.parameters() if p.requires_grad]
+        critic_params = [p for p in self.critic.parameters() if p.requires_grad]
+        n_actor = len(actor_params)
+        for param, new_param in zip(actor_params, params[:n_actor]):
+            param.data.copy_(new_param.data)
+        for param, new_param in zip(critic_params, params[n_actor:]):
+            param.data.copy_(new_param.data)
+
+    def get_param_values(self):
+        params = []
+        for param in self.get_all_params():
+            params.append(param.data.cpu().numpy())
+        return params
+
+    def set_param_values(self, values):
+        device = next(self.actor.parameters()).device
+        params = []
+        for value in values:
+            params.append(torch.FloatTensor(value).to(device))
+        self.set_params(params)
+
+    def copy_params_from(self, source_policy):
+        source_params = source_policy.get_all_params()
+        self.set_params(source_params)
+
+    def soft_update_from(self, source_policy, tau=0.01):
+        target_params = self.get_all_params()
+        source_params = source_policy.get_all_params()
+        
+        for target, source in zip(target_params, source_params):
+            target.data.copy_(
+                target.data * (1.0 - tau) + source.data * tau
+            )
     def save(self, dir_path, step=0):
         os.makedirs(dir_path, exist_ok=True)
+        path = os.path.join(dir_path, f"mappo_{step}")
+        save_dict = {
+            'critic_state_dict': self.critic.state_dict(),
+            'critic_optimizer_state_dict': self.critic_optimizer.state_dict(),
+        }
+        # Save state dicts for all actors and their optimizers
+        for i, (actor, optimizer) in enumerate(zip(self.actors, self.actor_optimizers)):
+            save_dict[f'actor_{i}_state_dict'] = actor.state_dict()
+            save_dict[f'actor_optimizer_{i}_state_dict'] = optimizer.state_dict()
         
-        # Save actors
-        for i in range(self.num_agents):
-            actor_path = os.path.join(dir_path, f"mappo_actor_{i}_{step}")
-            torch.save(self.actor[i].state_dict(), actor_path)
-            
-        # Save critic
-        critic_path = os.path.join(dir_path, f"mappo_critic_{step}")
-        torch.save(self.critic.state_dict(), critic_path)
-        print("[*] Model saved")
-        
+        torch.save(save_dict, path)
+
     def load(self, dir_path, step=0):
-        # Load actors
-        for i in range(self.num_agents):
-            actor_path = os.path.join(dir_path, f"mappo_actor_{i}_{step}")
-            self.actor[i].load_state_dict(torch.load(actor_path))
-            
-        # Load critic
-        critic_path = os.path.join(dir_path, f"mappo_critic_{step}")
-        self.critic.load_state_dict(torch.load(critic_path))
+        path = os.path.join(dir_path, f"mappo_{step}")
+        checkpoint = torch.load(path)
         
-        # Update target networks
-        for i in range(self.num_agents):
-            self.target_actor[i].load_state_dict(self.actor[i].state_dict())
-        self.target_critic.load_state_dict(self.critic.state_dict())
+        self.critic.load_state_dict(checkpoint['critic_state_dict'])
+        self.critic_optimizer.load_state_dict(checkpoint['critic_optimizer_state_dict'])
         
-        print("[*] Loaded model")
-        
-    def get_all_params(self):
-        """
-        Get all parameters from both actor and critic networks for self-play.
-        
-        Returns:
-            list: List of all parameters from both networks
-        """
-        params = []
-        # Get parameters from all actors
-        for actor in self.actor:
-            for k, v in actor.items():
-                params.extend(list(v.parameters()))
-        # Get parameters from critic
-        for k, v in self.critic.items():
-            params.extend(list(v.parameters()))
-        return params
-    
-    def get_params(self, network_dict):
-        """Helper method to get parameters from a network dictionary"""
-        params = []
-        for k, v in network_dict.items():
-            params.extend(list(v.parameters()))
-        return params
-    
-    def flush_buffer(self, **kwargs):
-        """
-        Push data to the replay buffer.
-        
-        Args:
-            **kwargs: Dictionary containing the following keys for each agent:
-                - obs_n: list of observations for each agent
-                - feature_n: list of additional features for each agent
-                - acts_n: list of actions taken by each agent
-                - rewards_n: list of rewards received by each agent
-                - alives_n: list of alive status for each agent
-                - obs_next_n: list of next observations for each agent
-                - feature_next_n: list of next additional features for each agent
-        """
-        self.replay_buffer.push(**kwargs)
+        # Load state dicts for all actors and their optimizers
+        for i, (actor, optimizer) in enumerate(zip(self.actors, self.actor_optimizers)):
+            actor.load_state_dict(checkpoint[f'actor_{i}_state_dict'])
+            optimizer.load_state_dict(checkpoint[f'actor_optimizer_{i}_state_dict'])
