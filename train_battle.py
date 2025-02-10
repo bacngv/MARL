@@ -56,8 +56,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     # Initialize environment
-    env = battle_v4.env(map_size=args.map_size, max_cycles=args.max_steps, step_reward=-0.0001,
-    dead_penalty=-0.05, attack_penalty=-0.001, attack_opponent_reward=0.2, render_mode="rgb_array")
+    env = battle_v4.env(map_size=args.map_size, max_cycles=args.max_steps, render_mode="rgb_array")
     env = env.unwrapped
     handles = env.env.get_handles()
 
