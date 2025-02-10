@@ -7,7 +7,7 @@ IQL = q_learning.DQN
 MFQ = q_learning.MFQ
 AC = ac.ActorCritic
 MFAC = ac.MFAC
-MAPPO = mappo.MAPPO
+MAPPO = mappo.MAPPOPolicy
 PPO = ppo.PPO
 
 
