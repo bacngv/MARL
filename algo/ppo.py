@@ -10,8 +10,8 @@ from . import tools
 
 class PPO(base.ValueNet):
     def __init__(self, env, name, handle, sub_len, memory_size=2**10, batch_size=64,
-                 update_every=5, use_mf=False, learning_rate=0.0001, clip_param=0.2,
-                 value_coef=0.5, entropy_coef=0.01, gamma=0.95, gae_lambda=0.95, tau=0.005):
+                 update_every=5, use_mf=False, learning_rate=0.0001, clip_param=0.3,
+                 value_coef=0.5, entropy_coef=0.01, gamma=0.95, gae_lambda=0.95, tau=0.01):
         super().__init__(env, name, handle, update_every=update_every, use_mf=use_mf,
                         learning_rate=learning_rate, gamma=gamma)
         
