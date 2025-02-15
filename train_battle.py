@@ -55,22 +55,20 @@ if __name__ == '__main__':
     parser.add_argument('--cuda', type=bool, default=True, help='use cuda')
     args = parser.parse_args()
 
-    # Initialize environment
     env = battle_v4.env(map_size=args.map_size, max_cycles=args.max_steps,  step_reward=-0.0001,
     dead_penalty=-0.05, attack_penalty=-0.001, attack_opponent_reward=0.2, render_mode="rgb_array")
     env = env.unwrapped
     handles = env.env.get_handles()
 
-    # Set up directories
     opponent_type = 'self' if args.self_play else 'random'
     base_log_dir = os.path.join(BASE_DIR, f'data/tmp/{args.algo}_{opponent_type}')
     base_render_dir = os.path.join(BASE_DIR, f'data/render/{args.algo}_{opponent_type}')
     base_model_dir = os.path.join(BASE_DIR, f'data/models/{args.algo}_{opponent_type}')
     
-    # Create main agent
+    # main agent
     main_model = spawn_ai(args.algo, env, handles[0], args.algo + '-main', args.max_steps, args.cuda)
     
-    # Create opponent based on mode
+    # opponent
     if args.self_play:
         opponent_model = spawn_ai(args.algo, env, handles[1], args.algo + '-opponent', args.max_steps, args.cuda)
     else:

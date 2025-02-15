@@ -7,7 +7,7 @@ IQL = q_learning.DQN
 MFQ = q_learning.MFQ
 AC = ac.ActorCritic
 MFAC = ac.MFAC
-MAPPO = mappo.MAPPOPolicy
+MAPPO = mappo.MAPPO
 PPO = ppo.PPO
 
 
@@ -24,7 +24,7 @@ def spawn_ai(algo_name, env, handle, human_name, max_steps, cuda=True):
         model = MFAC(env, human_name, handle, use_cuda=cuda)
     elif algo_name == 'mappo':
         num = env.unwrapped.env.get_num(handle)
-        model = MAPPO(env, human_name, handle, num_agents=num, use_cuda=cuda)
+        model = MAPPO(env, human_name, handle,num_agents=num, sub_len=500, memory_size=80000)
     if cuda:
         model = model.cuda()
     return model
