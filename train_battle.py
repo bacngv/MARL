@@ -44,7 +44,7 @@ def linear_decay(epoch, x, y):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--algo', type=str, choices={'ac', 'mfac', 'mfq', 'iql', 'ppo' ,'mappo'}, help='algorithm for main agent', required=True)
+    parser.add_argument('--algo', type=str, choices={'ac', 'mfac', 'mfq', 'iql', 'ppo' ,'mappo', 'maddpg'}, help='algorithm for main agent', required=True)
     parser.add_argument('--self_play', action='store_true', help='use self-play training instead of random opponent')
     parser.add_argument('--save_every', type=int, default=2, help='decide the save interval')
     parser.add_argument('--update_every', type=int, default=5, help='decide the update interval for q-learning, optional')
@@ -96,4 +96,3 @@ if __name__ == '__main__':
     for k in range(args.n_round):
         eps = linear_decay(k, [0, int(args.n_round * 0.8), args.n_round], [1, 0.2, 0.1])
         runner.run(eps, k)
-        
