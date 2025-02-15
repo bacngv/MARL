@@ -305,73 +305,6 @@ class MemoryGroup(object):
     @property
     def nb_entries(self):
         return len(self.obs0)
-    
-
-class MultiAgentMemoryGroup(object):
-    def __init__(self, obs_shape, feat_shape, act_n, max_len, batch_size, sub_len, num_agents, use_mean=False):
-        self.num_agents = num_agents
-        self.agent_memories = [
-            MemoryGroup(obs_shape, feat_shape, act_n, max_len, batch_size, sub_len, use_mean) 
-            for _ in range(num_agents)
-        ]
-        self.max_len = max_len
-        self.batch_size = batch_size
-        self.use_mean = use_mean
-
-    def push(self, **kwargs):
-        # Assuming kwargs contain data for multiple agents
-        for agent_id in range(self.num_agents):
-            agent_kwargs = {
-                'ids': [agent_id],
-                'state': (kwargs['state'][0][agent_id:agent_id+1], kwargs['state'][1][agent_id:agent_id+1]),
-                'acts': kwargs['acts'][agent_id:agent_id+1],
-                'rewards': kwargs['rewards'][agent_id:agent_id+1],
-                'alives': kwargs['alives'][agent_id:agent_id+1]
-            }
-            if self.use_mean:
-                agent_kwargs['prob'] = kwargs['prob'][agent_id:agent_id+1]
-            
-            self.agent_memories[agent_id].push(**agent_kwargs)
-
-    def tight(self):
-        for agent_memory in self.agent_memories:
-            agent_memory.tight()
-
-    def sample(self):
-        # Sample from each agent's memory
-        samples = [memory.sample() for memory in self.agent_memories]
-        
-        # Transpose and stack the samples
-        if self.use_mean:
-            # For memories with probabilities
-            obs = np.stack([s[0] for s in samples])
-            feat = np.stack([s[1] for s in samples])
-            acts = np.stack([s[2] for s in samples])
-            probs = np.stack([s[3] for s in samples])
-            obs_next = np.stack([s[4] for s in samples])
-            feat_next = np.stack([s[5] for s in samples])
-            probs_next = np.stack([s[6] for s in samples])
-            rewards = np.stack([s[7] for s in samples])
-            dones = np.stack([s[8] for s in samples])
-            masks = np.stack([s[9] for s in samples])
-            
-            return obs, feat, acts, probs, obs_next, feat_next, probs_next, rewards, dones, masks
-        else:
-            # For memories without probabilities
-            obs = np.stack([s[0] for s in samples])
-            feat = np.stack([s[1] for s in samples])
-            obs_next = np.stack([s[2] for s in samples])
-            feat_next = np.stack([s[3] for s in samples])
-            dones = np.stack([s[4] for s in samples])
-            rewards = np.stack([s[5] for s in samples])
-            acts = np.stack([s[6] for s in samples])
-            masks = np.stack([s[7] for s in samples])
-            
-            return obs, feat, obs_next, feat_next, dones, rewards, acts, masks
-
-    def get_batch_num(self):
-        # Returns the minimum batch number across all agent memories
-        return min(memory.get_batch_num() for memory in self.agent_memories)
 
 import os
 from moviepy.editor import ImageSequenceClip
@@ -393,8 +326,6 @@ class Runner(object):
         self.tau = tau
         self.cuda = cuda
         self.log_dir = log_dir
-        
-        # Create all necessary directories
         self._create_directories()
         
     def _create_directories(self):
@@ -468,7 +399,6 @@ class Runner(object):
             print('\n[INFO] Main: {} \nOpponent: {}'.format(info['main'], info['opponent']))
             
             if info['main']['total_reward'] > info['opponent']['total_reward']:
-                # Only perform soft update in self-play mode
                 if self.is_self_play():
                     print('[INFO] Self-play mode - performing soft update...')
                     self.soft_update()
@@ -476,8 +406,6 @@ class Runner(object):
                 
                 print('[INFO] Saving main model...')
                 self.models[0].save(self.model_dir + '-main', iteration)
-                
-                # Save opponent model only in self-play mode
                 if self.is_self_play():
                     print('[INFO] Saving opponent model...')
                     self.models[1].save(self.model_dir + '-opponent', iteration)
@@ -496,5 +424,3 @@ class Runner(object):
             clip = ImageSequenceClip(render_list, fps=35)
             clip.write_gif('{}/replay_{}.gif'.format(self.render_dir, iteration+1), fps=20, verbose=False)
             print('[*] Saved Render')
-
-            
