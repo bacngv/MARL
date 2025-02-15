@@ -24,7 +24,7 @@ def spawn_ai(algo_name, env, handle, human_name, max_steps, cuda=True):
         model = MFAC(env, human_name, handle, use_cuda=cuda)
     elif algo_name == 'mappo':
         num = env.unwrapped.env.get_num(handle)
-        model = MAPPO(env, human_name, handle,num_agents=num, sub_len=500, memory_size=80000)
+        model = MAPPO(env, human_name, handle,num_agents=num, sub_len=400, memory_size=40000)
     if cuda:
         model = model.cuda()
     return model

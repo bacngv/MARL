@@ -46,7 +46,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--algo', type=str, choices={'ac', 'mfac', 'mfq', 'iql', 'ppo' ,'mappo'}, help='algorithm for main agent', required=True)
     parser.add_argument('--self_play', action='store_true', help='use self-play training instead of random opponent')
-    parser.add_argument('--save_every', type=int, default=20, help='decide the save interval')
+    parser.add_argument('--save_every', type=int, default=2, help='decide the save interval')
     parser.add_argument('--update_every', type=int, default=5, help='decide the update interval for q-learning, optional')
     parser.add_argument('--n_round', type=int, default=600, help='set the training round')
     parser.add_argument('--render', action='store_true', help='render or not (if true, will render every save)')
@@ -55,7 +55,7 @@ if __name__ == '__main__':
     parser.add_argument('--cuda', type=bool, default=True, help='use cuda')
     args = parser.parse_args()
 
-    env = battle_v4.env(map_size=args.map_size, max_cycles=args.max_steps,  step_reward=-0.0001,
+    env = battle_v4.env(map_size=args.map_size, max_cycles=args.max_steps,  step_reward=0,
     dead_penalty=-0.05, attack_penalty=-0.001, attack_opponent_reward=0.2, render_mode="rgb_array")
     env = env.unwrapped
     handles = env.env.get_handles()
