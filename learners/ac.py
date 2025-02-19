@@ -4,7 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 
-from . import tools
+from .. import replaybuffer
 
 
 class ActorCritic(nn.Module):
@@ -30,7 +30,7 @@ class ActorCritic(nn.Module):
         self.feature_buf = np.empty([1,] + [self.feature_space])
         self.action_buf = np.empty(1, dtype=np.int32)
         self.reward_buf = np.empty(1, dtype=np.float32)
-        self.replay_buffer = tools.EpisodesBuffer()
+        self.replay_buffer = replaybuffer.EpisodesBuffer()
         
         self.net = self._construct_net()
         self.optim = torch.optim.Adam(lr=self.learning_rate, params=self.get_all_params())
@@ -72,7 +72,7 @@ class ActorCritic(nn.Module):
         n = 0
         # batch_data = sample_buffer.episodes()
         batch_data = self.replay_buffer.episodes()
-        self.replay_buffer = tools.EpisodesBuffer()
+        self.replay_buffer = runner.EpisodesBuffer()
 
         for episode in batch_data:
             n += len(episode.rewards)
@@ -200,7 +200,7 @@ class MFAC(nn.Module):
         self.feature_buf = np.empty([1,] + [self.feature_space])
         self.action_buf = np.empty(1, dtype=np.int32)
         self.reward_buf = np.empty(1, dtype=np.float32)
-        self.replay_buffer = tools.EpisodesBuffer(use_mean=True)
+        self.replay_buffer = replaybuffer.EpisodesBuffer(use_mean=True)
         
         self.net = self._construct_net()
         self.optim = torch.optim.Adam(lr=self.learning_rate, params=self.get_all_params())
@@ -252,7 +252,7 @@ class MFAC(nn.Module):
         n = 0
         # batch_data = sample_buffer.episodes()
         batch_data = self.replay_buffer.episodes()
-        self.replay_buffer = tools.EpisodesBuffer(use_mean=True)
+        self.replay_buffer = runner.EpisodesBuffer(use_mean=True)
 
         for episode in batch_data:
             n += len(episode.rewards)

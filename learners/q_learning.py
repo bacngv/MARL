@@ -5,14 +5,14 @@ import torch.nn.functional as F
 import numpy as np
 
 from . import base
-from . import tools
+from .. import replaybuffer
 
 
 class DQN(base.ValueNet):
     def __init__(self, env, name, handle, sub_len, memory_size=2**10, batch_size=64, update_every=5, use_mf=False, learning_rate=0.0001, tau=0.005, gamma=0.95):
         super().__init__(env, name, handle, update_every=update_every, use_mf=use_mf, learning_rate=learning_rate, tau=tau, gamma=gamma)
         
-        self.replay_buffer = tools.MemoryGroup(self.view_space, self.feature_space, self.num_actions, memory_size, batch_size, sub_len)
+        self.replay_buffer = replaybuffer.SimpleMemoryGroup(self.view_space, self.feature_space, self.num_actions, memory_size, batch_size, sub_len)
         
     def flush_buffer(self, **kwargs):
         self.replay_buffer.push(**kwargs)
@@ -74,7 +74,7 @@ class MFQ(base.ValueNet):
         }
 
         self.train_ct = 0
-        self.replay_buffer = tools.MemoryGroup(**config)
+        self.replay_buffer = replaybuffer.SimpleMemoryGroup(**config)
         self.update_every = update_every
         
     def flush_buffer(self, **kwargs):

@@ -6,7 +6,7 @@ import numpy as np
 from torch.distributions import Categorical
 
 from . import base
-from . import tools
+from .. import replaybuffer
 
 class PPO(base.ValueNet):
     def __init__(self, env, name, handle, sub_len, memory_size=2**10, batch_size=64,
@@ -21,7 +21,7 @@ class PPO(base.ValueNet):
         self.gae_lambda = gae_lambda
         self.tau = tau
         
-        self.replay_buffer = tools.MemoryGroup(self.view_space, self.feature_space,
+        self.replay_buffer = replaybuffer.SimpleMemoryGroup(self.view_space, self.feature_space,
                                              self.num_actions, memory_size, batch_size, sub_len)
         self.actor = self._construct_actor()
         self.critic = self._construct_critic()

@@ -3,8 +3,8 @@ import os
 import torch
 import numpy as np
 from magent2.environments import battle_v4
-from algo import spawn_ai
-from algo import tools
+from learners import spawn_ai
+from . import runner
 from senarios.senario_battle import play
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -44,7 +44,7 @@ def linear_decay(epoch, x, y):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--algo', type=str, choices={'ac', 'mfac', 'mfq', 'iql', 'ppo' ,'mappo', 'vdn'}, help='algorithm for main agent', required=True)
+    parser.add_argument('--algo', type=str, choices={'ac', 'mfac', 'mfq', 'iql', 'ppo' ,'mappo', 'vdn', 'qmix'}, help='algorithm for main agent', required=True)
     parser.add_argument('--self_play', action='store_true', help='use self-play training instead of random opponent')
     parser.add_argument('--save_every', type=int, default=2, help='decide the save interval')
     parser.add_argument('--update_every', type=int, default=5, help='decide the update interval for q-learning, optional')
@@ -61,9 +61,9 @@ if __name__ == '__main__':
     handles = env.env.get_handles()
 
     opponent_type = 'self' if args.self_play else 'random'
-    base_log_dir = os.path.join(BASE_DIR, f'data/tmp/{args.algo}_{opponent_type}')
-    base_render_dir = os.path.join(BASE_DIR, f'data/render/{args.algo}_{opponent_type}')
-    base_model_dir = os.path.join(BASE_DIR, f'data/models/{args.algo}_{opponent_type}')
+    base_log_dir = os.path.join(BASE_DIR, f'results/tmp/{args.algo}_{opponent_type}')
+    base_render_dir = os.path.join(BASE_DIR, f'results/render/{args.algo}_{opponent_type}')
+    base_model_dir = os.path.join(BASE_DIR, f'results/models/{args.algo}_{opponent_type}')
     
     # main agent
     main_model = spawn_ai(args.algo, env, handles[0], args.algo + '-main', args.max_steps, args.cuda)
@@ -77,7 +77,7 @@ if __name__ == '__main__':
     
     models = [main_model, opponent_model]
 
-    runner = tools.Runner(
+    runner = runner.Runner(
         env, 
         handles, 
         args.max_steps, 

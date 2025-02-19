@@ -1,8 +1,9 @@
 import os
 import torch
 import numpy as np
+from moviepy.video.io.ImageSequenceClip import ImageSequenceClip
 from magent2.environments import battle_v4 
-from algo import spawn_ai
+from learners import spawn_ai
 from senarios.senario_battle import play
 import argparse
 
@@ -70,7 +71,6 @@ def run_battle_with_red_opponent(red_algo, blue_algo, red_step, blue_step, red_m
 
     # save gif
     if render_list:
-        from moviepy.video.io.ImageSequenceClip import ImageSequenceClip
         print(f"[*] Saving render to {render_path}...")
         clip = ImageSequenceClip(render_list, fps=35)
         clip.write_gif(render_path, fps=35, verbose=False)
@@ -78,9 +78,9 @@ def run_battle_with_red_opponent(red_algo, blue_algo, red_step, blue_step, red_m
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--red_algo', type=str, choices={'ac', 'mfac', 'mfq', 'iql', 'random', 'ppo', 'mappo', 'vdn'}, 
+    parser.add_argument('--red_algo', type=str, choices={'ac', 'mfac', 'mfq', 'iql', 'random', 'ppo', 'mappo', 'vdn', 'qmix'}, 
                        help='algorithm for main agent', required=True)
-    parser.add_argument('--blue_algo', type=str, choices={'ac', 'mfac', 'mfq', 'iql', 'random', 'ppo' , 'mappo', 'vdn'}, 
+    parser.add_argument('--blue_algo', type=str, choices={'ac', 'mfac', 'mfq', 'iql', 'random', 'ppo' , 'mappo', 'vdn', 'qmix'}, 
                        help='algorithm for opponent agent', required=True)
     parser.add_argument('--red_path', type=str,
                        help='path to red team model directory (required if not random)')
