@@ -4,7 +4,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 def load_model_data(model, base_dir):
-    possible_names = ["training_metrics.csv", "traning_metrics.csv"]
+    possible_names = ["training_metrics.csv"]
     for name in possible_names:
         candidate = os.path.join(base_dir, model, name)
         if os.path.exists(candidate):

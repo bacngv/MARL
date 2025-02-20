@@ -226,8 +226,12 @@ class SimpleMemoryGroup(object):
             return obs, feature, obs_next, feature_next, dones, rewards, actions, masks
 
     def get_batch_num(self):
-        print('\n[INFO] Length of buffer and new add:', len(self.obs0), self._new_add)
-        res = self._new_add * 2 // self.batch_size
+        buffer_length = len(self.obs0)
+        print('\n[INFO] Buffer length:', buffer_length, " new additions:", self._new_add)
+        if buffer_length >= self.batch_size:
+            res = buffer_length // self.batch_size
+        else:
+            res = 0
         self._new_add = 0
         return res
 

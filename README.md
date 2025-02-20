@@ -1,7 +1,7 @@
 # MARL 
 
 ## How to run
-Check out the [PIPELINE](https://colab.research.google.com/drive/1mYrtfrhfxD1EnnA1lmpu4guv8vAYJ1he) for a comprehensive overview of running the agent in the MAgent2 environment.
+Check out the [PIPELINE](https://colab.research.google.com/drive/1PdeBtLQ-qi1UXXqkLWZgkY-fvz8CY-XW) for a comprehensive overview of running the agent in the MAgent2 environment.
 
 ## Installation
 Clone this repo and install with:
