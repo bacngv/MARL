@@ -3,7 +3,6 @@ from . import ac
 from . import mappo
 from . import ppo
 from . import vdn
-from . import qmix
 
 IQL = q_learning.DQN
 MFQ = q_learning.MFQ
@@ -12,7 +11,7 @@ MFAC = ac.MFAC
 MAPPO = mappo.MAPPO
 PPO = ppo.PPO
 VDN = vdn.VDN
-QMIX = qmix.QMIX
+QMIX = q_learning.QMix
 
 def spawn_ai(algo_name, env, handle, human_name, max_steps, cuda=True):
     num = env.unwrapped.env.get_num(handle)

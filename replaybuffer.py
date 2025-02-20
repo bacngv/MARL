@@ -310,7 +310,8 @@ class MemoryGroup(object):
     def push(self, **kwargs):
         for i, _id in enumerate(kwargs['ids']):
             if _id not in self.agent:
-                self.agent[_id] = AgentMemory(self.obs_shape, self.feat_shape, self.act_n, self.sub_len, use_mean=self.use_mean,
+                self.agent[_id] = AgentMemory(self.obs_shape, self.feat_shape, self.act_n, self.sub_len,
+                                              use_mean=self.use_mean,
                                               global_state_shape=kwargs['global_state'][0].shape)
             if self.use_mean:
                 self.agent[_id].append(
@@ -341,7 +342,7 @@ class MemoryGroup(object):
             tmp = self.agent[ele].pull()
             self._new_add += len(tmp['obs0'])
             self._flush(**tmp)
-        self.agent = dict()  # clear
+        self.agent = dict()  # clear agent memories
 
     def sample(self):
         idx = np.random.choice(self.nb_entries, size=self.batch_size)
@@ -366,15 +367,18 @@ class MemoryGroup(object):
         return obs, feature, obs_next, feature_next, dones, rewards, actions, masks, old_log_prob
 
     def get_batch_num(self):
-        print('\n[INFO] Length of buffer and new add:', len(self.obs0), self._new_add)
-        res = self._new_add * 2 // self.batch_size
+        buffer_length = len(self.obs0)
+        print('\n[INFO] Buffer length:', buffer_length, " new additions:", self._new_add)
+        if buffer_length >= self.batch_size:
+            res = buffer_length // self.batch_size
+        else:
+            res = 0
         self._new_add = 0
         return res
 
     @property
     def nb_entries(self):
         return len(self.obs0)
-
 
 class MAMemoryGroup(MemoryGroup):
     def __init__(self, obs_shape, feat_shape, global_state_shape, act_n, max_len, batch_size, sub_len, use_mean=False):
@@ -389,7 +393,8 @@ class MAMemoryGroup(MemoryGroup):
         kwargs['global_state'] = global_states_array
         for i, _id in enumerate(kwargs['ids']):
             if _id not in self.agent:
-                self.agent[_id] = AgentMemory(self.obs_shape, self.feat_shape, self.act_n, self.sub_len, use_mean=self.use_mean,
+                self.agent[_id] = AgentMemory(self.obs_shape, self.feat_shape, self.act_n, self.sub_len,
+                                              use_mean=self.use_mean,
                                               global_state_shape=self.global_states.data.shape[1:])
             if self.use_mean:
                 self.agent[_id].append(
@@ -415,8 +420,9 @@ class MAMemoryGroup(MemoryGroup):
     def sample(self):
         (obs, feat, obs_next, feat_next, dones, rewards,
          acts, masks, old_log_prob) = super().sample()
-        global_state = self.global_states.sample(np.arange(len(self.obs0))[:self.batch_size])
-        global_state_next = self.global_states.sample((np.arange(len(self.obs0))[:self.batch_size] + 1) % len(self.obs0))
+        indices = np.arange(len(self.obs0))[:self.batch_size]
+        global_state = self.global_states.sample(indices)
+        global_state_next = self.global_states.sample((indices + 1) % len(self.obs0))
         return obs, feat, obs_next, feat_next, dones, rewards, acts, masks, old_log_prob, global_state, global_state_next
         
 
