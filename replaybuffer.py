@@ -190,7 +190,7 @@ class SimpleMemoryGroup(object):
     def push(self, **kwargs):
         for i, _id in enumerate(kwargs['ids']):
             if self.agent.get(_id) is None:
-                self.agent[_id] = AgentMemory(self.obs_shape, self.feat_shape, self.act_n, self.sub_len, use_mean=self.use_mean)
+                self.agent[_id] = SimpleAgentMemory(self.obs_shape, self.feat_shape, self.act_n, self.sub_len, use_mean=self.use_mean)
             if self.use_mean:
                 self.agent[_id].append(obs0=kwargs['state'][0][i], feat0=kwargs['state'][1][i], act=kwargs['acts'][i], reward=kwargs['rewards'][i], alive=kwargs['alives'][i], prob=kwargs['prob'][i])
             else:

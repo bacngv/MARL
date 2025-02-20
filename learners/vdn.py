@@ -122,7 +122,7 @@ class VDN(base.ValueNet):
         for i in range(batch_num):
             sample_data = self.replay_buffer.sample()
             (obs, feat, obs_next, feat_next, dones, rewards,
-             acts, masks, old_log_prob, global_state, global_state_next) = sample_data
+            acts, masks, old_log_prob, global_state, global_state_next) = sample_data
             obs = torch.FloatTensor(obs).permute([0, 3, 1, 2])
             obs_next = torch.FloatTensor(obs_next).permute([0, 3, 1, 2])
             feat = torch.FloatTensor(feat)
@@ -157,10 +157,14 @@ class VDN(base.ValueNet):
             loss.backward()
             self.optimizer.step()
             total_loss += loss.item()
-            self.update_target_network()
+            self.update_target_network() 
             if i % 50 == 0:
-                print(f'[VDN] Batch {i}/{batch_num} Loss: {loss.item():.4f}')
-        print(f"[VDN] Total loss: {total_loss:.4f}")
+                print(f'[*] VDN LOSS (Batch {i}): {loss.item():.4f} '
+                      f'(Current Q: {current_q.mean().item():.4f}, Target Q: {target_q.mean().item():.4f})')
+        
+        print(f'[*] TOTAL VDN LOSS: {total_loss:.4f}')
+        return total_loss
+
     def save(self, dir_path, step=0):
         os.makedirs(dir_path, exist_ok=True)
         qnet_path = os.path.join(dir_path, f"vdn_qnet_{step}")

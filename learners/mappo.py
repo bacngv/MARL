@@ -35,7 +35,7 @@ class MAPPO(base.ValueNet):
         self.target_actor.load_state_dict(self.actor.state_dict())
         self.target_critic.load_state_dict(self.critic.state_dict())
         self.actor_optim = torch.optim.Adam(self.get_params(self.actor), lr=learning_rate)
-        self.critic_optim = torch.optim.Adam(self.critic.parameters(), lr=learning_rate)
+        self.critic_optim = torch.optim.Adam(self.critic.parameters(), lr=learning_rate) 
     def get_all_params(self):
         params = []
         for k, v in self.actor.items():
@@ -117,7 +117,6 @@ class MAPPO(base.ValueNet):
         else:
             prob_tensor = None
         acts_tensor = torch.LongTensor(kwargs['acts']).to(device)
-
         with torch.no_grad():
             _, log_prob, _, _ = self.get_action_and_value(obs_tensor, feat_tensor, prob_tensor, action=acts_tensor)
         kwargs['old_log_prob'] = log_prob.cpu().numpy()
@@ -168,12 +167,10 @@ class MAPPO(base.ValueNet):
                 global_state = global_state.cuda()
                 global_state_next = global_state_next.cuda()
             _, new_log_prob, entropy, _ = self.get_action_and_value(obs, feat, action=acts)
-            # r = exp(new_log_prob - old_log_prob)
             ratio = torch.exp(new_log_prob - old_log_prob)
             values = self.get_value(global_state, use_target=False)
             with torch.no_grad():
                 next_values = self.get_value(global_state_next, use_target=True)
-            # gae
             advantages = torch.zeros_like(rewards)
             lastgaelam = 0
             for t in reversed(range(len(rewards))):
@@ -192,8 +189,8 @@ class MAPPO(base.ValueNet):
             surr2 = torch.clamp(ratio, 1 - self.clip_param, 1 + self.clip_param) * advantages
             policy_loss = -torch.min(surr1, surr2).mean()
             value_loss = F.mse_loss(values, returns)
-            entropy_loss = -entropy.mean()
-            loss = policy_loss + self.value_coef * value_loss + self.entropy_coef * entropy_loss
+            entropy_term = -entropy.mean()
+            loss = policy_loss + self.value_coef * value_loss + self.entropy_coef * entropy_term
             self.actor_optim.zero_grad()
             self.critic_optim.zero_grad()
             loss.backward()
@@ -201,9 +198,10 @@ class MAPPO(base.ValueNet):
             self.critic_optim.step()
             total_loss += loss.item()
             if i % 50 == 0:
-                print(f'[MAPPO] LOSS: {loss.item():.4f} (Policy: {policy_loss.item():.4f}, '
-                      f'Value: {value_loss.item():.4f}, Entropy: {entropy_loss.item():.4f})')
-        print(f"[MAPPO] Total loss: {total_loss:.4f}")
+                print(f'[*] MAPPO LOSS (Batch {i}): {loss.item():.4f} '
+                      f'(Policy: {policy_loss.item():.4f}, Value: {value_loss.item():.4f}, Entropy: {entropy_term.item():.4f})')
+        print(f'[*] TOTAL MAPPO LOSS: {total_loss:.4f}')
+        return total_loss
     def save(self, dir_path, step=0):
         os.makedirs(dir_path, exist_ok=True)
         actor_path = os.path.join(dir_path, f"mappo_actor_{step}")

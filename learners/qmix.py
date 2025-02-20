@@ -138,7 +138,6 @@ class QMIX(base.ValueNet):
             joint_feat = list(joint_feat) + pad_feat
             joint_feat = np.array(joint_feat)
             kwargs['state'] = (joint_obs, joint_feat)
-            
             # Padding
             if 'acts' in kwargs:
                 acts = list(kwargs['acts'])
@@ -163,7 +162,6 @@ class QMIX(base.ValueNet):
             _ = self.get_agent_q(obs_tensor, feat_tensor, prob_tensor)
         kwargs['old_log_prob'] = np.zeros_like(acts_tensor.cpu().numpy(), dtype=np.float32)
         self.replay_buffer.push(**kwargs)
-
     def get_global_state(self, obs_all, feat_all):
         global_list = []
         for o, f in zip(obs_all, feat_all):
@@ -179,17 +177,16 @@ class QMIX(base.ValueNet):
         elif current_length > expected_length:
             global_state = global_state[:expected_length]
         return global_state
-
     def train(self, cuda=False):
         batch_num = self.replay_buffer.get_batch_num()
         if batch_num == 0:
             print("[QMIX] Not enough samples to train")
-            return
+            return 0
         total_loss = 0
         for i in range(batch_num):
             sample_data = self.replay_buffer.sample()
             (obs, feat, obs_next, feat_next, dones, rewards,
-             acts, masks, old_log_prob, global_state, global_state_next) = sample_data
+            acts, masks, old_log_prob, global_state, global_state_next) = sample_data
             obs = torch.FloatTensor(obs)
             obs_next = torch.FloatTensor(obs_next)
             feat = torch.FloatTensor(feat)
@@ -233,8 +230,9 @@ class QMIX(base.ValueNet):
             total_loss += loss.item()
             self.update_target_network()
             if i % 50 == 0:
-                print(f'[QMIX] Batch {i}/{batch_num} Loss: {loss.item():.4f}')
-        print(f"[QMIX] Total loss: {total_loss:.4f}")
+                print(f'[*] QMIX LOSS (Batch {i}): {loss.item():.4f} (MSE: {loss.item():.4f})')
+        print(f'[*] TOTAL QMIX LOSS: {total_loss:.4f}')
+        return total_loss
     def save(self, dir_path, step=0):
         os.makedirs(dir_path, exist_ok=True)
         agent_path = os.path.join(dir_path, f"qmix_agent_net_{step}.pt")
