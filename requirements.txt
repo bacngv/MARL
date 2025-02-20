@@ -1,6 +1,6 @@
 moviepy
 numpy
-git+https://github.com/Farama-Foundation/MAgent2
+magent2
 torch
 torchaudio
 torchvision

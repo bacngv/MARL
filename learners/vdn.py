@@ -6,9 +6,8 @@ import numpy as np
 
 from torch.distributions import Categorical
 from . import base 
-from .. import replaybuffer
+import replaybuffer
 
-# --- Value Decomposition Network ---
 class VDN(base.ValueNet):
     def __init__(self, env, name, handle, sub_len, num_agents, memory_size=2**10, batch_size=64,
                  update_every=5, learning_rate=0.0001, gamma=0.95, tau=0.01, use_mf=False):

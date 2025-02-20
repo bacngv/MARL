@@ -5,7 +5,7 @@ import torch.nn.functional as F
 import numpy as np
 
 from . import base
-from .. import replaybuffer
+import replaybuffer
 
 
 class DQN(base.ValueNet):

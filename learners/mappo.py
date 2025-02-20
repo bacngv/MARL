@@ -6,7 +6,7 @@ import numpy as np
 from torch.distributions import Categorical
 
 from . import base
-from .. import replaybuffer
+import replaybuffer
 
 # CTDE MAPPO
 class MAPPO(base.ValueNet):

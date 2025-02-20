@@ -6,7 +6,7 @@ import numpy as np
 
 from torch.distributions import Categorical
 from . import base
-from .. import replaybuffer
+import replaybuffer
 
 class QMixNet(nn.Module):
     def __init__(self, num_agents, state_dim, mixing_embed_dim=32):

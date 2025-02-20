@@ -4,7 +4,7 @@ import torch
 import numpy as np
 from magent2.environments import battle_v4
 from learners import spawn_ai
-from . import runner
+import runner
 from senarios.senario_battle import play
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))

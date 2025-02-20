@@ -6,7 +6,7 @@ import numpy as np
 from torch.distributions import Categorical
 
 from . import base
-from .. import replaybuffer
+import replaybuffer
 
 class PPO(base.ValueNet):
     def __init__(self, env, name, handle, sub_len, memory_size=2**10, batch_size=64,
