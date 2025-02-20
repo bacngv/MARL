@@ -16,11 +16,11 @@ QMIX = q_learning.QMix
 def spawn_ai(algo_name, env, handle, human_name, max_steps, cuda=True):
     num = env.unwrapped.env.get_num(handle)
     if algo_name == 'mfq':
-        model = MFQ(env, human_name, handle, max_steps, memory_size=80000)
+        model = MFQ(env, human_name, handle, max_steps, memory_size=40000)
     elif algo_name == 'iql':
-        model = IQL(env, human_name, handle, max_steps, memory_size=80000)
+        model = IQL(env, human_name, handle, max_steps, memory_size=40000)
     elif algo_name == 'ppo':
-        model = PPO(env, human_name, handle, max_steps, memory_size=80000)
+        model = PPO(env, human_name, handle, max_steps, memory_size=40000)
     elif algo_name == 'ac':
         model = AC(env, human_name, handle, use_cuda=cuda)
     elif algo_name == 'mfac':
