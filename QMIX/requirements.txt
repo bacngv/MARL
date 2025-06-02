@@ -1,0 +1,6 @@
+numpy 
+torch==2.6.0
+tensorboard==2.18 
+gym==0.10.5 
+numpy-stl
+git+https://github.com/bacngv/MAgent2.git
