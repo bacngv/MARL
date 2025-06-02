@@ -60,7 +60,7 @@ class Q_network_MLP(nn.Module):
         return Q
 
 
-class QMIX_SMAC(object):
+class QMIX(object):
     def __init__(self, args):
         self.N = args.N
         self.action_dim = args.action_dim

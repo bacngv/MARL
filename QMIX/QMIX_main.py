@@ -6,7 +6,7 @@ import csv
 from torch.utils.tensorboard import SummaryWriter
 import argparse
 from replay_buffer import ReplayBuffer
-from qmix_smac import QMIX_SMAC
+from QMIX.qmix import QMIX
 from normalization import Normalization
 import os
 from IPython import display as ipy_display
@@ -91,7 +91,7 @@ class Runner_QMIX_MAgent2:
         print("action_dim={}".format(self.args.action_dim))
 
         # Create QMIX agent
-        self.agent_n = QMIX_SMAC(self.args)
+        self.agent_n = QMIX(self.args)
         self.replay_buffer = ReplayBuffer(self.args)
 
         # Initialize TensorBoard writer
