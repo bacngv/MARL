@@ -7,21 +7,13 @@ If you want to use QMIX, you can set the paraemeter 'algorithm' = 'QMIX';<br />
 If you want to use VDN, you can set the paraemeter 'algorithm' = 'VDN'.<br />
 
 ## Trainning environments
-You can set the 'env_index' in the codes to change the maps in StarCraft II. Here, we train our code in 3 maps.<br />
-env_index=0 represent '3m'<br />
-env_index=1 represent '8m'<br />
-env_index=2 represent '2s_3z'<br />
+- Check out the [PIPELINE](https://colab.research.google.com/drive/1MKJx-ihFlReny8CL6BSgNMQduuQyfMcH)
+- We train our QMIX in 'battle_v4' in MAgent2 environment.<br />
 
 ## Requirements
-python==3.7.9<br />
-numpy==1.19.4<br />
-pytorch==1.12.0<br />
-tensorboard==0.6.0<br />
-[SMAC-StarCraft Multi-Agent Challenge](https://github.com/oxwhirl/smac)
-
-
-## Trainning results
-![image](https://github.com/Lizhi-sjtu/MARL-code-pytorch/blob/main/3.QMIX_VDN_SMAC/QMIX_SMAC_training_result.png)
+```
+pip install -r requirements.txt
+```
 
 ## Reference
 [1] Rashid T, Samvelyan M, Schroeder C, et al. Qmix: Monotonic value function factorisation for deep multi-agent reinforcement learning[C]//International Conference on Machine Learning. PMLR, 2018: 4295-4304.<br />
