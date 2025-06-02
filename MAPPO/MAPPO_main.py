@@ -285,17 +285,20 @@ class Runner_MAPPO_MAgent2:
         
         render_env.close()
         
-        # Save GIF
+        # Save GIF with 35 FPS
         if frames:
             gif_filename = f'./gifs/MAPPO_env_{self.env_name}_step_{self.total_steps}.gif'
+            # Calculate duration for 35 FPS: 1000ms / 35fps ≈ 28.57ms per frame
+            duration_ms = int(1000 / 35)  # 28ms for 35 FPS
+            
             frames[0].save(
                 gif_filename,
                 save_all=True,
                 append_images=frames[1:],
-                duration=200,  # Duration per frame in milliseconds
+                duration=duration_ms,  # 28ms per frame for 35 FPS
                 loop=0
             )
-            print(f"GIF saved: {gif_filename}")
+            print(f"GIF saved with 35 FPS: {gif_filename}")
         else:
             print("No frames captured for GIF")
 

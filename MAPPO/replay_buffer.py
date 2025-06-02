@@ -15,13 +15,13 @@ class ReplayBuffer:
         # create a buffer (dictionary)
 
     def reset_buffer(self):
-        self.buffer = {'obs_n': np.empty([self.batch_size, self.episode_limit, self.N, self.obs_dim]),
-                       's': np.empty([self.batch_size, self.episode_limit, self.state_dim]),
-                       'v_n': np.empty([self.batch_size, self.episode_limit + 1, self.N]),
-                       'a_n': np.empty([self.batch_size, self.episode_limit, self.N]),
-                       'a_logprob_n': np.empty([self.batch_size, self.episode_limit, self.N]),
-                       'r_n': np.empty([self.batch_size, self.episode_limit, self.N]),
-                       'done_n': np.empty([self.batch_size, self.episode_limit, self.N])
+        self.buffer = {'obs_n': np.zeros([self.batch_size, self.episode_limit, self.N, self.obs_dim]),
+                       's': np.zeros([self.batch_size, self.episode_limit, self.state_dim]),
+                       'v_n': np.zeros([self.batch_size, self.episode_limit + 1, self.N]),
+                       'a_n': np.zeros([self.batch_size, self.episode_limit, self.N]),
+                       'a_logprob_n': np.zeros([self.batch_size, self.episode_limit, self.N]),
+                       'r_n': np.zeros([self.batch_size, self.episode_limit, self.N]),
+                       'done_n': np.zeros([self.batch_size, self.episode_limit, self.N])
                        }
         self.episode_num = 0
 
