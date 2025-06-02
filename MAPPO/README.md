@@ -7,7 +7,7 @@ You can dircetly run 'MAPPO_main.py' in your own IDE.<br />
 
 ## Trainning environments
 - Check out the [PIPELINE](https://colab.research.google.com/drive/1veHUQ3242LK_JJA9LmIPq3T2U95ANHTF)
-- We train our MAPPO in 'battle_v4' in MPE environment.<br />
+- We train our MAPPO in 'battle_v4' in MAgent2 environment.<br />
 
 ## Requirements
 ```
