@@ -6,7 +6,7 @@ import csv
 from torch.utils.tensorboard import SummaryWriter
 import argparse
 from replay_buffer import ReplayBuffer
-from QMIX.qmix import QMIX
+from qmix import QMIX
 from normalization import Normalization
 import os
 from IPython import display as ipy_display
